@@ -55,8 +55,10 @@ Unraid itself: don't pass it through to the Home Assistant VM. Frigate's own
 Coral is unaffected; the tracker uses the first Edge TPU that isn't busy.
 
 Check Unraid sees it (terminal): `lsusb | grep -Ei "1a6e|18d1"`. It shows as
-`Global Unichip` until first used, then `Google`; that change is why the
-container gets the whole USB bus.
+`Global Unichip` until first used, then `Google`. That change gives it a new
+device node, which is why the container gets the live `/dev/bus/usb` and
+permission for any USB device (`--device-cgroup-rule='c 189:* rmw'`) rather
+than a fixed device list: otherwise the first start after a reboot fails.
 
 ### 2. Build the image
 
@@ -89,7 +91,7 @@ it if the camera is already in Frigate (or use Frigate's restream,
 ### 4. Set up the picture (snapshot)
 
 ```bash
-docker run --rm --device /dev/bus/usb \
+docker run --rm --device-cgroup-rule='c 189:* rmw' -v /dev/bus/usb:/dev/bus/usb \
   -v /mnt/user/appdata/camtracker:/config \
   --env-file /mnt/user/appdata/camtracker/camtracker.env \
   camtracker --snapshot /config/snap.jpg
@@ -120,7 +122,7 @@ points = 0.12:0.9, 0.5:0, 0.88:-0.9
 
 ```bash
 docker run -d --name camtracker --restart unless-stopped \
-  --device /dev/bus/usb \
+  --device-cgroup-rule='c 189:* rmw' -v /dev/bus/usb:/dev/bus/usb \
   -v /mnt/user/appdata/camtracker:/config \
   --env-file /mnt/user/appdata/camtracker/camtracker.env \
   camtracker
@@ -143,9 +145,13 @@ ssh joshc@pi-eye-right.home 'sudo systemctl disable --now ha-bridge'
 ## Troubleshooting
 
 - `no usable Edge TPU`: the Coral isn't visible to the container (check
-  `--device /dev/bus/usb` and `lsusb`), or it's the one Frigate is using.
+  `lsusb` on the host and the `/dev/bus/usb` options above), or another
+  program is using it.
 - `can't open the stream`: wrong `CAMERA_URL`; test it in VLC. Some cameras
   allow only a couple of RTSP connections: use Frigate's restream instead.
+- `[cam] opening ...` and then nothing for 30 s: the server can't reach the
+  camera at all (wrong IP or port, or a firewall/VLAN in the way). From the
+  server: `timeout 5 bash -c '</dev/tcp/<camera-ip>/554' && echo open`.
 - People far away missed: use the main stream instead of the substream, or a
   narrower `roi` (more tiles = more detail).
 - Eyes look away from people: `invert_x = true`, restart the container.

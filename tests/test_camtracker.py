@@ -283,3 +283,8 @@ def test_find_tpus_counts_corals(tmp_path):
     (dev / "apex_0").write_text("")
     assert CT.find_tpus(str(usb), str(dev)) == ["usb:0", "usb:1", "pci:0"]
     assert CT.find_tpus(str(tmp_path / "none"), str(tmp_path / "none")) == []
+
+
+def test_redact_hides_camera_login():
+    assert CT.redact("rtsp://admin:p@ss@192.168.1.20:554/sub") == "rtsp://***@192.168.1.20:554/sub"
+    assert CT.redact("rtsp://cam:554/sub") == "rtsp://cam:554/sub"

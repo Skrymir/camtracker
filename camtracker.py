@@ -32,6 +32,7 @@ import glob
 import json
 import math
 import os
+import re
 import signal
 import socket
 import sys
@@ -374,6 +375,11 @@ class Tracker:
 CAPTURE_OPTIONS = "rtsp_transport;tcp|fflags;nobuffer|flags;low_delay"
 
 
+def redact(url):
+    """rtsp://user:pass@host/... -> rtsp://***@host/... (for logs)."""
+    return re.sub(r"//[^/]*@", "//***@", url, count=1)
+
+
 class FrameGrabber:
     """Reads the stream on its own thread and keeps only the newest frame, so
     detection always sees "now" rather than a backlog. Reconnects on failure."""
@@ -418,6 +424,7 @@ class FrameGrabber:
         os.environ.setdefault("OPENCV_FFMPEG_CAPTURE_OPTIONS", CAPTURE_OPTIONS)
         backoff = 1.0
         while not self._stop.is_set():
+            print(f"[cam] opening {redact(self.url)}", flush=True)
             cap = cv2.VideoCapture(self.url, cv2.CAP_FFMPEG)
             if not cap.isOpened():
                 self.ok = False
@@ -689,13 +696,14 @@ def snapshot(cfg, detector, path):
     import cv2
     g = FrameGrabber(cfg.url)
     g.start()
-    deadline = time.monotonic() + 20
+    # longer than ffmpeg's ~30 s open timeout, so its error is printed first
+    deadline = time.monotonic() + 45
     seq, frame = 0, None
     while frame is None and time.monotonic() < deadline:
         seq, frame = g.latest(seq, timeout=1.0)
     g.stop()
     if frame is None:
-        raise SystemExit("!! no frame from the camera in 20 s — check [camera] url / CAMERA_URL")
+        raise SystemExit("!! no frame from the camera in 45 s — check [camera] url / CAMERA_URL")
     h, w = frame.shape[:2]
     tiles = tile_boxes(cfg.roi, w, h, cfg.tiles)
     img = frame.copy()

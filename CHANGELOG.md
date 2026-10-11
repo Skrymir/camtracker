@@ -10,6 +10,11 @@
   is now Debian 12 (bookworm, Python 3.11) with libedgetpu from feranick's
   builds and Frigate's tflite_runtime wheel, both checksum-pinned. pycoral is
   gone; the detector calls tflite_runtime directly.
+- The Coral works on the first start after a reboot: the container mounts the
+  live `/dev/bus/usb` with a cgroup rule for USB devices, instead of a
+  `--device` list that goes stale when the Coral changes its USB ID.
+- Logs which stream it is opening (password hidden); `--snapshot` waits 45 s
+  so ffmpeg's own open timeout is reported.
 
 ## 0.1.0 — 2026-10-10
 

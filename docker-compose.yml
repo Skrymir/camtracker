@@ -5,11 +5,13 @@ services:
     image: camtracker
     container_name: camtracker
     restart: unless-stopped
-    # Whole USB bus: the Coral changes its USB ID after its first use, so
-    # passing one /dev/bus/usb/xxx/yyy path breaks after a restart.
-    devices:
-      - /dev/bus/usb:/dev/bus/usb
+    # The Coral changes its USB ID (and device node) on its first use after
+    # power-up, so a --device list made at start goes stale. Instead: the live
+    # /dev/bus/usb, and permission for any USB device (char major 189).
+    device_cgroup_rules:
+      - "c 189:* rmw"
     volumes:
+      - /dev/bus/usb:/dev/bus/usb
       - /mnt/user/appdata/camtracker:/config
     # Secrets here (or in Unraid's container settings), never in the repo.
     env_file:
