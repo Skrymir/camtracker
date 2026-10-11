@@ -1,0 +1,16 @@
+# Unraid: Compose Manager plugin, or `docker compose up -d` here.
+services:
+  camtracker:
+    build: .
+    image: camtracker
+    container_name: camtracker
+    restart: unless-stopped
+    # Whole USB bus: the Coral changes its USB ID after its first use, so
+    # passing one /dev/bus/usb/xxx/yyy path breaks after a restart.
+    devices:
+      - /dev/bus/usb:/dev/bus/usb
+    volumes:
+      - /mnt/user/appdata/camtracker:/config
+    # Secrets here (or in Unraid's container settings), never in the repo.
+    env_file:
+      - /mnt/user/appdata/camtracker/camtracker.env

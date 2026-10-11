@@ -1,0 +1,14 @@
+venv/
+.venv/
+__pycache__/
+.pytest_cache/
+*.pyc
+.DS_Store
+local/
+*.jpg
+
+# Secrets: never commit (camera URL with password, MQTT login)
+.env
+*.env
+secrets/
+*.local.ini

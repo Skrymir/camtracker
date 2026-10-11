@@ -1,0 +1,3 @@
+# Runtime outside Docker (the image installs the rest from Debian's apt:
+# OpenCV, numpy, pycoral, libedgetpu).
+paho-mqtt==2.1.0
