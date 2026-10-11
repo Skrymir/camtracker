@@ -21,12 +21,14 @@ Runs in Docker on a server with a USB Coral (see README.md).
                                              # (for calibration); add
                                              # --no-publish to leave the eyes alone
 
-Only the run/IO parts need OpenCV and pycoral; the mapping and tracking logic
-(Mapper, pick, Tracker) is pure Python and unit-tested on its own.
+Only the run/IO parts need OpenCV and tflite_runtime; the mapping, tracking
+and detection-parsing logic (Mapper, pick, Tracker, ssd_people) is pure Python
+and unit-tested on its own.
 """
 
 import argparse
 import configparser
+import glob
 import json
 import math
 import os
@@ -266,6 +268,23 @@ def nms(dets, thresh=0.5):
     return keep
 
 
+def ssd_people(boxes, classes, scores, count, tile, frame_w, frame_h, cfg):
+    """One tile's SSD output (boxes as ymin, xmin, ymax, xmax fractions of the
+    tile) -> the people in it, [(score, x1, y1, x2, y2)] as frame fractions."""
+    tx1, ty1, tx2, ty2 = tile
+    tw, th = tx2 - tx1, ty2 - ty1
+    out = []
+    for i in range(min(count, len(scores))):
+        if int(classes[i]) != cfg.person_id or scores[i] < cfg.min_score:
+            continue
+        ymin, xmin, ymax, xmax = (float(b) for b in boxes[i])
+        x1, y1 = (tx1 + max(0.0, xmin) * tw) / frame_w, (ty1 + max(0.0, ymin) * th) / frame_h
+        x2, y2 = (tx1 + min(1.0, xmax) * tw) / frame_w, (ty1 + min(1.0, ymax) * th) / frame_h
+        if (y2 - y1) >= cfg.min_height:
+            out.append((float(scores[i]), x1, y1, x2, y2))
+    return out
+
+
 def tile_boxes(roi, frame_w, frame_h, tiles=0, overlap=0.15):
     """Split the ROI into side-by-side tiles (pixels: x1, y1, x2, y2), each
     roughly square so the model's square input isn't squashed. tiles=0: auto."""
@@ -422,33 +441,52 @@ class FrameGrabber:
             self._stop.wait(1.0)            # don't spin if it drops straight away
 
 
+# USB Corals as (vendor, product): before and after their firmware is loaded
+CORAL_USB_IDS = {("1a6e", "089a"), ("18d1", "9302")}
+
+
+def find_tpus(sys_usb="/sys/bus/usb/devices", dev="/dev"):
+    """Edge TPU device names to try: usb:0.. for each USB Coral, pci:0.. for
+    each PCIe one. Empty if none can be seen."""
+    n_usb = 0
+    for d in glob.glob(os.path.join(sys_usb, "*")):
+        try:
+            ids = tuple(open(os.path.join(d, f)).read().strip()
+                        for f in ("idVendor", "idProduct"))
+        except OSError:
+            continue
+        n_usb += ids in CORAL_USB_IDS
+    n_pci = len(glob.glob(os.path.join(dev, "apex_*")))
+    return [f"usb:{i}" for i in range(n_usb)] + [f"pci:{i}" for i in range(n_pci)]
+
+
 class CoralDetector:
-    """SSD-style detection model on an Edge TPU (pycoral)."""
+    """SSD-style detection model on an Edge TPU (tflite_runtime + libedgetpu)."""
 
     def __init__(self, cfg):
-        from pycoral.adapters import common, detect
-        from pycoral.utils.edgetpu import list_edge_tpus, make_interpreter
-        self._common, self._detect = common, detect
+        from tflite_runtime.interpreter import Interpreter, load_delegate
         self.cfg = cfg
         if cfg.device.lower() != "auto":
             candidates = [cfg.device]
         else:
-            tpus = list_edge_tpus()
-            print(f"[tpu] found {len(tpus)} Edge TPU(s): {tpus}", flush=True)
-            n_usb = sum(1 for t in tpus if t.get("type") == "usb")
-            n_pci = sum(1 for t in tpus if t.get("type") == "pci")
-            candidates = [f"usb:{i}" for i in range(n_usb)] + [f"pci:{i}" for i in range(n_pci)]
+            candidates = find_tpus()
+            print(f"[tpu] found {len(candidates)} Edge TPU(s): {candidates}", flush=True)
         err = None
         for dev in candidates:
             try:
-                interp = make_interpreter(cfg.model, device=dev)
+                interp = Interpreter(model_path=cfg.model, experimental_delegates=[
+                    load_delegate("libedgetpu.so.1", {"device": dev})])
                 interp.allocate_tensors()
             except Exception as e:                  # busy (Frigate) or absent
                 print(f"[tpu] {dev}: {e}", flush=True)
                 err = e
                 continue
             self.interp, self.device = interp, dev
-            self.size = common.input_size(interp)
+            inp = interp.get_input_details()[0]
+            self._input = inp["index"]
+            self.size = (int(inp["shape"][2]), int(inp["shape"][1]))     # w, h
+            # SSD postprocess outputs: boxes, classes, scores, count
+            self._outputs = [d["index"] for d in interp.get_output_details()[:4]]
             print(f"[tpu] using {dev}, model input {self.size[0]}x{self.size[1]}", flush=True)
             return
         raise RuntimeError(f"no usable Edge TPU (tried {candidates or 'none found'}): {err}")
@@ -458,22 +496,15 @@ class CoralDetector:
         [(score, x1, y1, x2, y2)] as fractions of the whole frame."""
         import cv2
         fh, fw = frame.shape[:2]
-        w, h = self.size
         out = []
-        for (tx1, ty1, tx2, ty2) in tiles:
+        for tile in tiles:
+            tx1, ty1, tx2, ty2 = tile
             crop = frame[ty1:ty2, tx1:tx2]
-            rgb = cv2.cvtColor(cv2.resize(crop, (w, h)), cv2.COLOR_BGR2RGB)
-            self._common.set_input(self.interp, rgb)
+            rgb = cv2.cvtColor(cv2.resize(crop, self.size), cv2.COLOR_BGR2RGB)
+            self.interp.set_tensor(self._input, rgb[None])
             self.interp.invoke()
-            sx, sy = (tx2 - tx1) / w, (ty2 - ty1) / h
-            for o in self._detect.get_objects(self.interp, self.cfg.min_score):
-                if o.id != self.cfg.person_id:
-                    continue
-                b = o.bbox
-                x1, y1 = (tx1 + b.xmin * sx) / fw, (ty1 + b.ymin * sy) / fh
-                x2, y2 = (tx1 + b.xmax * sx) / fw, (ty1 + b.ymax * sy) / fh
-                if (y2 - y1) >= self.cfg.min_height:
-                    out.append((float(o.score), x1, y1, x2, y2))
+            boxes, classes, scores, count = (self.interp.get_tensor(i)[0] for i in self._outputs)
+            out += ssd_people(boxes, classes, scores, int(count), tile, fw, fh, self.cfg)
         return nms(out)
 
 

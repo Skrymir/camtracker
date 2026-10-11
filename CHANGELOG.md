@@ -6,6 +6,10 @@
   the followed person is waited for up to `lost_after_s` before switching.
 - Lower stream latency: ffmpeg reads the RTSP stream with input buffering off
   (`fflags nobuffer`, `flags low_delay`).
+- Docker image builds again: Google deleted the Coral apt repo, so the image
+  is now Debian 12 (bookworm, Python 3.11) with libedgetpu from feranick's
+  builds and Frigate's tflite_runtime wheel, both checksum-pinned. pycoral is
+  gone; the detector calls tflite_runtime directly.
 
 ## 0.1.0 — 2026-10-10
 

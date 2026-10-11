@@ -2,24 +2,32 @@
 # Build:
 #   docker build -t camtracker .
 #
-# Debian 11 (bullseye) on purpose: Google's Coral packages (libedgetpu,
-# pycoral) are no longer updated and only install cleanly on bullseye's
-# Python 3.9 with its numpy 1.x. Everything here comes from apt except paho.
-FROM debian:bullseye-slim
+# Google's Coral apt repo is gone (the project was deleted), so this follows
+# Frigate: Debian 12 (bookworm), libedgetpu from feranick's maintained builds,
+# and the tflite_runtime wheel Frigate publishes. No pycoral. Both downloads
+# are checked against their sha256.
+FROM python:3.11-slim-bookworm
+
+ARG LIBEDGETPU_URL=https://github.com/feranick/libedgetpu/releases/download/16.0TF2.17.1-1/libedgetpu1-std_16.0tf2.17.1-1.bookworm_amd64.deb
+ARG LIBEDGETPU_SHA256=a3e1f9ae3e4725032a863ea38f52aa396ee18fdb65135fed56e8efae5c2e467d
+ARG TFLITE_URL=https://github.com/frigate-nvr/TFlite-builds/releases/download/v2.17.1/tflite_runtime-2.17.1-cp311-cp311-linux_x86_64.whl
+ARG TFLITE_SHA256=a6b4e57f13c536a737aeb0ebd27618177ddbbabb1e4242c9c3403cd566fe71b6
 
 ARG DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates curl gnupg \
- && curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg \
-        | gpg --dearmor -o /usr/share/keyrings/coral-edgetpu.gpg \
- && echo "deb [signed-by=/usr/share/keyrings/coral-edgetpu.gpg] https://packages.cloud.google.com/apt coral-edgetpu-stable main" \
-        > /etc/apt/sources.list.d/coral-edgetpu.list \
- && apt-get update && apt-get install -y --no-install-recommends \
-        libedgetpu1-std python3-pycoral python3-opencv python3-numpy python3-pip \
+        ca-certificates curl libusb-1.0-0 libglib2.0-0 \
+ && curl -fsSL -o /tmp/libedgetpu.deb "$LIBEDGETPU_URL" \
+ && echo "$LIBEDGETPU_SHA256  /tmp/libedgetpu.deb" | sha256sum -c - \
+ && dpkg -i /tmp/libedgetpu.deb && rm /tmp/libedgetpu.deb \
  && rm -rf /var/lib/apt/lists/*
 
-# Same paho as requirements.txt (tests/test_docker.py checks).
-RUN pip3 install --no-cache-dir paho-mqtt==2.1.0
+# Same paho as requirements.txt (tests/test_docker.py checks). numpy 1.x:
+# tflite_runtime 2.17 is built against it.
+RUN curl -fsSL -o /tmp/tflite_runtime-2.17.1-cp311-cp311-linux_x86_64.whl "$TFLITE_URL" \
+ && echo "$TFLITE_SHA256  /tmp/tflite_runtime-2.17.1-cp311-cp311-linux_x86_64.whl" | sha256sum -c - \
+ && pip install --no-cache-dir /tmp/tflite_runtime-2.17.1-cp311-cp311-linux_x86_64.whl \
+        numpy==1.26.4 opencv-python-headless==4.10.0.84 paho-mqtt==2.1.0 \
+ && rm /tmp/*.whl
 
 # The detection model Frigate uses on a Coral (COCO; class 0 = person).
 RUN mkdir -p /models && curl -fsSL -o /models/ssdlite_mobiledet_coco_qat_postprocess_edgetpu.tflite \

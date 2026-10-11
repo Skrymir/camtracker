@@ -163,5 +163,5 @@ python3 -m venv venv && ./venv/bin/pip install -r requirements-dev.txt
 
 The tests cover the mapping, who to follow, the target/clear messages, the
 command handling and the Home Assistant templates; none need OpenCV, a Coral
-or a broker. OpenCV and pycoral are only imported by the stream and detector
-classes, which run in the container.
+or a broker. OpenCV and tflite_runtime are only imported by the stream and
+detector classes, which run in the container.

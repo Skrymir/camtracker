@@ -11,8 +11,8 @@ jobs:
     timeout-minutes: 10
     strategy:
       matrix:
-        # 3.9 = what the Docker image (Debian bullseye) runs
-        python-version: ["3.9", "3.13"]
+        # 3.11 = what the Docker image (Debian bookworm) runs
+        python-version: ["3.11", "3.13"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

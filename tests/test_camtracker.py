@@ -253,3 +253,33 @@ def test_status_templates_render():
     (det,) = [c for c in d.values() if c["unique_id"] == "camtracker_camera_detector"]
     attrs = env.from_string(det["json_attributes_template"]).render(value_json=json.loads(snap))
     assert json.loads(attrs) == {"enabled": True, "host": "tower", "version": "x"}
+
+
+# -- detector output (no Coral) -----------------------------------------------
+def test_ssd_people_maps_tile_boxes_to_frame():
+    c = cfg(person_id=0, min_score=0.5, min_height=0.04)
+    boxes = [(0.1, 0.2, 0.9, 0.4),            # person, in the right half's tile
+             (0.1, 0.5, 0.9, 0.6),            # a car (class 2)
+             (0.1, 0.6, 0.9, 0.7),            # a person, too unsure
+             (0.5, 0.1, 0.52, 0.2),           # a person, too short
+             (0.0, 0.0, 1.0, 1.0)]            # past count: ignored
+    classes, scores = [0, 2, 0, 0, 0], [0.9, 0.9, 0.3, 0.9, 0.9]
+    tile = (640, 0, 1280, 720)                # right half of a 1280x720 frame
+    (p,) = CT.ssd_people(boxes, classes, scores, 4, tile, 1280, 720, c)
+    assert p[0] == pytest.approx(0.9)
+    assert p[1:] == pytest.approx((0.6, 0.1, 0.7, 0.9))
+
+
+def test_find_tpus_counts_corals(tmp_path):
+    usb, dev = tmp_path / "usb", tmp_path / "dev"
+    for name, vid, pid in (("1-1", "1a6e", "089a"), ("1-2", "18d1", "9302"),
+                           ("1-3", "046d", "c52b")):              # a mouse
+        d = usb / name
+        d.mkdir(parents=True)
+        (d / "idVendor").write_text(vid + "\n")
+        (d / "idProduct").write_text(pid + "\n")
+    (usb / "usb1").mkdir()                                     # a hub: no ids
+    dev.mkdir()
+    (dev / "apex_0").write_text("")
+    assert CT.find_tpus(str(usb), str(dev)) == ["usb:0", "usb:1", "pci:0"]
+    assert CT.find_tpus(str(tmp_path / "none"), str(tmp_path / "none")) == []
