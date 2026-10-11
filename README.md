@@ -43,7 +43,8 @@ moves down as a person's feet get lower in the frame (closer).
 
 Who it looks at: the nearest person (tallest box), and it stays on them while
 they're in view rather than flicking to whoever is closest each frame. Brief
-missed detections (`lost_after_s`) don't drop the target.
+missed detections (`lost_after_s`) don't drop the target or move it to
+someone else.
 
 ## Running it on Unraid
 
@@ -148,6 +149,10 @@ ssh joshc@pi-eye-right.home 'sudo systemctl disable --now ha-bridge'
 - People far away missed: use the main stream instead of the substream, or a
   narrower `roi` (more tiles = more detail).
 - Eyes look away from people: `invert_x = true`, restart the container.
+- Eyes lag behind people: use the camera's own substream rather than
+  Frigate's restream (one hop less), and lower the camera's I-frame interval
+  if it has the setting. The stream is read with ffmpeg's input buffering off
+  (`OPENCV_FFMPEG_CAPTURE_OPTIONS`, set it in `camtracker.env` to override).
 
 ## Development
 

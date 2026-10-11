@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- A single missed detection no longer moves the eyes to someone else in view:
+  the followed person is waited for up to `lost_after_s` before switching.
+- Lower stream latency: ffmpeg reads the RTSP stream with input buffering off
+  (`fflags nobuffer`, `flags low_delay`).
+
 ## 0.1.0 — 2026-10-10
 
 First version, split out of demoneye (where it started as `cam_tracker.py`

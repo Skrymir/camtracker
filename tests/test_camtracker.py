@@ -141,11 +141,11 @@ def test_acquire_snaps_then_smooths_and_rate_limits():
     (m,) = t.update([box(0.5)])
     assert m[0] == "target" and m[1] == pytest.approx(0.0)
     clk.t += 0.05
-    assert t.update([box(1.0)]) == []                # rate limit, but still smoothing
-    assert t.sx == pytest.approx(0.5 * t.mapper.gaze_x(1.0))
+    assert t.update([box(0.7)]) == []                # rate limit, but still smoothing
+    assert t.sx == pytest.approx(0.5 * t.mapper.gaze_x(0.7))
     clk.t += 0.06
-    (m,) = t.update([box(1.0)])
-    assert m[0] == "target" and m[1] == pytest.approx(0.75 * t.mapper.gaze_x(1.0))
+    (m,) = t.update([box(0.7)])
+    assert m[0] == "target" and m[1] == pytest.approx(0.75 * t.mapper.gaze_x(0.7))
 
 
 def test_brief_misses_hold_then_clear_once():
@@ -157,6 +157,20 @@ def test_brief_misses_hold_then_clear_once():
     clk.t += 0.4                                     # 0.9 s since last seen
     assert t.update([]) == [("clear",)]
     assert t.tick() == [] and not t.have
+
+
+def test_brief_miss_does_not_flick_to_someone_else():
+    t, clk = make(max_jump=0.25)
+    t.update([box(0.2, h=0.2)])                      # following A on the left
+    clk.t += 0.1
+    t.update([box(0.8, h=0.4)])                      # A missed once, B (nearer) in view
+    assert t.last_u == pytest.approx(0.2)
+    clk.t += 0.1
+    t.update([box(0.22, h=0.2), box(0.8, h=0.4)])    # A is back: still on A
+    assert t.last_u == pytest.approx(0.22)
+    clk.t += 0.9                                      # A gone for good: move to B, no clear
+    assert [m[0] for m in t.update([box(0.8, h=0.4)])] == ["target"]
+    assert t.last_u == pytest.approx(0.8) and t.have
 
 
 def test_heartbeat_for_someone_standing_still():

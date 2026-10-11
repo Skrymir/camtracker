@@ -317,6 +317,11 @@ class Tracker:
         if p is None:
             return self.tick()
         u, v = p
+        if (self.have and abs(u - self.last_u) > self.cfg.max_jump
+                and now - self.last_seen < self.cfg.lost_after):
+            # the person being followed was missed this frame and someone else
+            # is in view: wait for them rather than flicking over
+            return self.tick()
         gx, gy = self.mapper(u, v)
         self.last_u, self.last_seen = u, now
         if not self.have:                        # fresh: snap, no smoothing
@@ -346,6 +351,10 @@ class Tracker:
 
 
 # ---------------------------------------------------------------- video IO
+# ffmpeg options for the stream (OPENCV_FFMPEG_CAPTURE_OPTIONS overrides)
+CAPTURE_OPTIONS = "rtsp_transport;tcp|fflags;nobuffer|flags;low_delay"
+
+
 class FrameGrabber:
     """Reads the stream on its own thread and keeps only the newest frame, so
     detection always sees "now" rather than a backlog. Reconnects on failure."""
@@ -386,7 +395,8 @@ class FrameGrabber:
 
     def _run(self):
         import cv2
-        os.environ.setdefault("OPENCV_FFMPEG_CAPTURE_OPTIONS", "rtsp_transport;tcp")
+        # no input buffering: ffmpeg otherwise queues frames, and the eyes lag
+        os.environ.setdefault("OPENCV_FFMPEG_CAPTURE_OPTIONS", CAPTURE_OPTIONS)
         backoff = 1.0
         while not self._stop.is_set():
             cap = cv2.VideoCapture(self.url, cv2.CAP_FFMPEG)
