@@ -754,14 +754,16 @@ def snapshot(cfg, detector, path):
     h, w = frame.shape[:2]
     tiles = tile_boxes(cfg.roi, w, h, cfg.tiles)
     img = frame.copy()
+    k = w / 640                                     # drawing scale: readable at 4K too
+    thin, thick = max(1, round(k)), max(2, round(2 * k))
     for (x1, y1, x2, y2) in tiles:
-        cv2.rectangle(img, (x1, y1), (x2, y2), (255, 160, 0), 1)
+        cv2.rectangle(img, (x1, y1), (x2, y2), (255, 160, 0), thin)
     r = cfg.roi
     cv2.rectangle(img, (int(r[0] * w), int(r[1] * h)), (int(r[2] * w), int(r[3] * h)),
-                  (0, 200, 255), 2)
+                  (0, 200, 255), thick)
     for b in cfg.ignore:                            # ignore boxes: magenta
         cv2.rectangle(img, (int(b[0] * w), int(b[1] * h)), (int(b[2] * w), int(b[3] * h)),
-                      (255, 0, 255), 1)
+                      (255, 0, 255), thin)
     m = Mapper(cfg)
     # look a bit below min_score too, so near misses show (orange)
     low = max(0.2, cfg.min_score - 0.2)
@@ -778,17 +780,19 @@ def snapshot(cfg, detector, path):
             what, colour = "person", (0, 0, 255)
             n_people += 1
         p1, p2 = (int(d[1] * w), int(d[2] * h)), (int(d[3] * w), int(d[4] * h))
-        cv2.rectangle(img, p1, p2, colour, 2)
-        cv2.putText(img, f"{d[0]:.2f} u={u:.2f}", (p1[0], max(12, p1[1] - 4)),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, colour, 1)
+        cv2.rectangle(img, p1, p2, colour, thick)
+        label = f"{d[0]:.2f} u={u:.2f}"
+        (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.45 * k, thin)
+        cv2.putText(img, label, (min(p1[0], w - tw), max(th + thin, p1[1] - int(4 * k))),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45 * k, colour, thin)
         box = ", ".join(f"{v:.2f}" for v in d[1:])
         print(f"[snap] {what:9} score {d[0]:.2f}  u={u:.2f} x={m.gaze_x(u):+.2f}  "
               f"box {box}", flush=True)
     for i in range(1, 10):                          # u ruler along the bottom
         x = int(i / 10 * w)
-        cv2.line(img, (x, h - 12), (x, h), (255, 255, 255), 1)
-        cv2.putText(img, f"{i / 10:.1f}", (x + 2, h - 2), cv2.FONT_HERSHEY_SIMPLEX,
-                    0.35, (255, 255, 255), 1)
+        cv2.line(img, (x, h - int(14 * k)), (x, h), (255, 255, 255), thin)
+        cv2.putText(img, f"{i / 10:.1f}", (x + int(3 * k), h - int(3 * k)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.4 * k, (255, 255, 255), thin)
     cv2.imwrite(path, img)
     print(f"[snap] {w}x{h}, detail {frame_detail(frame):.0f}, {len(tiles)} tile(s), "
           f"{n_people} person(s) -> {path}", flush=True)

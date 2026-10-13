@@ -22,6 +22,8 @@
 - `--snapshot` waits (from 2 s in) for a frame with detail rather than the
   first one, which on H.265 can be grey until the next keyframe; it prints
   the frame's detail and warns if the picture is still blank.
+- `--snapshot` drawing scales with the frame, so labels and the ruler are
+  readable on a 4K stream; labels stay inside the picture.
 - Logs which stream it is opening (password hidden); `--snapshot` waits 45 s
   so ffmpeg's own open timeout is reported.
 
