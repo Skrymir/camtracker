@@ -98,7 +98,10 @@ docker run --rm --device-cgroup-rule='c 189:* rmw' -v /dev/bus/usb:/dev/bus/usb 
 ```
 
 Open `snap.jpg` (it's in the appdata share). Yellow = the ROI, blue = the
-detection tiles, red = people found, with a 0.1-0.9 ruler along the bottom. Set
+detection tiles, red = people found (with their score), orange = near misses
+just under `min_score`, magenta = ignored decorations, with a 0.1-0.9 ruler
+along the bottom. Each detection is also printed with its `box`: put a
+decoration's box in `[detector] ignore` so the eyes don't stare at it. Set
 `roi` to a strip over your side of the street (skip the sky and your yard)
 and take another snapshot.
 

@@ -13,6 +13,12 @@
 - The Coral works on the first start after a reboot: the container mounts the
   live `/dev/bus/usb` with a cgroup rule for USB devices, instead of a
   `--device` list that goes stale when the Coral changes its USB ID.
+- `[detector] ignore`: boxes for decorations the model takes for people (a
+  ghost, a skeleton). A detection that matches one (IoU >= `ignore_iou`) is
+  dropped; someone walking past it is still seen.
+- `--snapshot` shows each box's score, draws near misses (just under
+  `min_score`) in orange and ignored decorations in magenta, and prints each
+  detection's box ready to paste into `ignore`.
 - Logs which stream it is opening (password hidden); `--snapshot` waits 45 s
   so ffmpeg's own open timeout is reported.
 

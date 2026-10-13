@@ -288,3 +288,32 @@ def test_find_tpus_counts_corals(tmp_path):
 def test_redact_hides_camera_login():
     assert CT.redact("rtsp://admin:p@ss@192.168.1.20:554/sub") == "rtsp://***@192.168.1.20:554/sub"
     assert CT.redact("rtsp://cam:554/sub") == "rtsp://cam:554/sub"
+
+
+# -- decorations ----------------------------------------------------------------
+def test_ignore_boxes_parse_and_validate(tmp_path):
+    assert CT.parse_boxes("0.78, 0.13, 0.83, 0.29; 0.1,0.2,0.3,0.4") == [
+        (0.78, 0.13, 0.83, 0.29), (0.1, 0.2, 0.3, 0.4)]
+    assert CT.parse_boxes("") == []
+    for bad in ("0.1, 0.2, 0.3", "0.5, 0.2, 0.4, 0.4"):
+        with pytest.raises(ValueError):
+            CT.parse_boxes(bad)
+    p = tmp_path / "c.ini"
+    p.write_text("[detector]\nignore = 0.78, 0.13, 0.83, 0.29\n")
+    assert CT.Config(str(p)).ignore == [(0.78, 0.13, 0.83, 0.29)]
+
+
+def test_decoration_dropped_person_walking_past_kept():
+    ghost = (0.78, 0.13, 0.83, 0.29)
+    seen_ghost = (0.8, 0.785, 0.135, 0.828, 0.288)      # jittered a little
+    passer_by = (0.9, 0.76, 0.10, 0.80, 0.30)           # walking in front of it
+    elsewhere = (0.9, 0.40, 0.10, 0.45, 0.30)
+    assert CT.drop_ignored([seen_ghost, passer_by, elsewhere], [ghost]) == [passer_by, elsewhere]
+    assert CT.drop_ignored([seen_ghost], []) == [seen_ghost]
+
+
+def test_ssd_people_min_score_override():
+    c = cfg(person_id=0, min_score=0.5, min_height=0.0)
+    args = ([(0.1, 0.1, 0.9, 0.2)], [0], [0.35], 1, (0, 0, 100, 100), 100, 100, c)
+    assert CT.ssd_people(*args) == []
+    assert len(CT.ssd_people(*args, min_score=0.3)) == 1

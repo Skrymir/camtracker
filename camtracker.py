@@ -60,6 +60,11 @@ DEFAULTS = {
         "min_score": "0.5",
         # ignore boxes shorter than this fraction of the frame height
         "min_height": "0.04",
+        # things that look like people but aren't (decorations): boxes as
+        # "x1, y1, x2, y2; ..." in frame fractions, from --snapshot
+        "ignore": "",
+        # a detection overlapping an ignore box at least this much (IoU) is it
+        "ignore_iou": "0.5",
     },
     "mqtt": {"host": "192.168.86.5", "port": "1883", "username": "", "password": "",
              "target_topic": "house/tracking/target",
@@ -102,6 +107,19 @@ def _floats(text, n=None, what="value"):
     if n is not None and len(vals) != n:
         raise ValueError(f"{what}: expected {n} numbers, got {text!r}")
     return vals
+
+
+def parse_boxes(text):
+    """'0.1, 0.2, 0.3, 0.4; 0.5, ...' -> [(0.1, 0.2, 0.3, 0.4), ...]."""
+    boxes = []
+    for part in str(text or "").split(";"):
+        if not part.strip():
+            continue
+        b = tuple(_floats(part, 4, "ignore box"))
+        if not (0 <= b[0] < b[2] <= 1 and 0 <= b[1] < b[3] <= 1):
+            raise ValueError(f"ignore box must be x1,y1,x2,y2 inside 0..1: {part.strip()!r}")
+        boxes.append(b)
+    return boxes
 
 
 def parse_points(text):
@@ -148,6 +166,8 @@ class Config:
         self.person_id = cp.getint("detector", "person_id")
         self.min_score = cp.getfloat("detector", "min_score")
         self.min_height = cp.getfloat("detector", "min_height")
+        self.ignore = parse_boxes(g("detector", "ignore"))
+        self.ignore_iou = cp.getfloat("detector", "ignore_iou")
 
         self.mqtt_host = g("mqtt", "host")
         self.mqtt_port = cp.getint("mqtt", "port")
@@ -269,14 +289,16 @@ def nms(dets, thresh=0.5):
     return keep
 
 
-def ssd_people(boxes, classes, scores, count, tile, frame_w, frame_h, cfg):
+def ssd_people(boxes, classes, scores, count, tile, frame_w, frame_h, cfg, min_score=None):
     """One tile's SSD output (boxes as ymin, xmin, ymax, xmax fractions of the
-    tile) -> the people in it, [(score, x1, y1, x2, y2)] as frame fractions."""
+    tile) -> the people in it, [(score, x1, y1, x2, y2)] as frame fractions.
+    min_score: instead of cfg.min_score (the snapshot looks lower)."""
+    min_score = cfg.min_score if min_score is None else min_score
     tx1, ty1, tx2, ty2 = tile
     tw, th = tx2 - tx1, ty2 - ty1
     out = []
     for i in range(min(count, len(scores))):
-        if int(classes[i]) != cfg.person_id or scores[i] < cfg.min_score:
+        if int(classes[i]) != cfg.person_id or scores[i] < min_score:
             continue
         ymin, xmin, ymax, xmax = (float(b) for b in boxes[i])
         x1, y1 = (tx1 + max(0.0, xmin) * tw) / frame_w, (ty1 + max(0.0, ymin) * th) / frame_h
@@ -284,6 +306,12 @@ def ssd_people(boxes, classes, scores, count, tile, frame_w, frame_h, cfg):
         if (y2 - y1) >= cfg.min_height:
             out.append((float(scores[i]), x1, y1, x2, y2))
     return out
+
+
+def drop_ignored(dets, ignore, min_iou=0.5):
+    """Detections that aren't one of the ignore boxes (a decoration seen as a
+    person). Someone walking past one has a different box, so is kept."""
+    return [d for d in dets if all(iou(d[1:], b) < min_iou for b in ignore)]
 
 
 def tile_boxes(roi, frame_w, frame_h, tiles=0, overlap=0.15):
@@ -498,7 +526,7 @@ class CoralDetector:
             return
         raise RuntimeError(f"no usable Edge TPU (tried {candidates or 'none found'}): {err}")
 
-    def detect(self, frame, tiles):
+    def detect(self, frame, tiles, min_score=None):
         """People in frame (BGR) within the tile rectangles ->
         [(score, x1, y1, x2, y2)] as fractions of the whole frame."""
         import cv2
@@ -511,7 +539,8 @@ class CoralDetector:
             self.interp.set_tensor(self._input, rgb[None])
             self.interp.invoke()
             boxes, classes, scores, count = (self.interp.get_tensor(i)[0] for i in self._outputs)
-            out += ssd_people(boxes, classes, scores, int(count), tile, fw, fh, self.cfg)
+            out += ssd_people(boxes, classes, scores, int(count), tile, fw, fh, self.cfg,
+                              min_score)
         return nms(out)
 
 
@@ -649,7 +678,8 @@ class CamTracker:
                 h, w = frame.shape[:2]
                 tiles = tile_boxes(self.cfg.roi, w, h, self.cfg.tiles)
                 print(f"[cam] frame {w}x{h}, {len(tiles)} tile(s): {tiles}", flush=True)
-            dets = self.detector.detect(frame, tiles)
+            dets = drop_ignored(self.detector.detect(frame, tiles), self.cfg.ignore,
+                                self.cfg.ignore_iou)
             with self._lock:
                 if self.enabled:
                     self._send(self.tracker.update(dets))
@@ -712,21 +742,38 @@ def snapshot(cfg, detector, path):
     r = cfg.roi
     cv2.rectangle(img, (int(r[0] * w), int(r[1] * h)), (int(r[2] * w), int(r[3] * h)),
                   (0, 200, 255), 2)
+    for b in cfg.ignore:                            # ignore boxes: magenta
+        cv2.rectangle(img, (int(b[0] * w), int(b[1] * h)), (int(b[2] * w), int(b[3] * h)),
+                      (255, 0, 255), 1)
     m = Mapper(cfg)
-    dets = detector.detect(frame, tiles) if detector else []
+    # look a bit below min_score too, so near misses show (orange)
+    low = max(0.2, cfg.min_score - 0.2)
+    dets = detector.detect(frame, tiles, min_score=low) if detector else []
+    kept = drop_ignored(dets, cfg.ignore, cfg.ignore_iou)
+    n_people = 0
     for d in dets:
-        p1, p2 = (int(d[1] * w), int(d[2] * h)), (int(d[3] * w), int(d[4] * h))
-        cv2.rectangle(img, p1, p2, (0, 0, 255), 2)
         u = (d[1] + d[3]) / 2
-        cv2.putText(img, f"u={u:.2f} x={m.gaze_x(u):+.2f}", (p1[0], max(12, p1[1] - 4)),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 255), 1)
+        if d not in kept:
+            what, colour = "ignored", (255, 0, 255)
+        elif d[0] < cfg.min_score:
+            what, colour = "near miss", (0, 140, 255)
+        else:
+            what, colour = "person", (0, 0, 255)
+            n_people += 1
+        p1, p2 = (int(d[1] * w), int(d[2] * h)), (int(d[3] * w), int(d[4] * h))
+        cv2.rectangle(img, p1, p2, colour, 2)
+        cv2.putText(img, f"{d[0]:.2f} u={u:.2f}", (p1[0], max(12, p1[1] - 4)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, colour, 1)
+        box = ", ".join(f"{v:.2f}" for v in d[1:])
+        print(f"[snap] {what:9} score {d[0]:.2f}  u={u:.2f} x={m.gaze_x(u):+.2f}  "
+              f"box {box}", flush=True)
     for i in range(1, 10):                          # u ruler along the bottom
         x = int(i / 10 * w)
         cv2.line(img, (x, h - 12), (x, h), (255, 255, 255), 1)
         cv2.putText(img, f"{i / 10:.1f}", (x + 2, h - 2), cv2.FONT_HERSHEY_SIMPLEX,
                     0.35, (255, 255, 255), 1)
     cv2.imwrite(path, img)
-    print(f"[snap] {w}x{h}, {len(tiles)} tile(s), {len(dets)} person(s) -> {path}", flush=True)
+    print(f"[snap] {w}x{h}, {len(tiles)} tile(s), {n_people} person(s) -> {path}", flush=True)
 
 
 def main(argv=None):
