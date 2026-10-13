@@ -27,6 +27,7 @@
   the frame's detail and warns if the picture is still blank.
 - `--snapshot` drawing scales with the frame, so labels and the ruler are
   readable on a 4K stream; labels stay inside the picture.
+- `--watch` prints each detection's box too, for `ignore`.
 - Logs which stream it is opening (password hidden); `--snapshot` waits 45 s
   so ffmpeg's own open timeout is reported.
 

@@ -726,9 +726,10 @@ class CamTracker:
                 m = self.tracker.mapper
                 for d in dets:
                     u, v = (d[1] + d[3]) / 2, d[4]
+                    box = ", ".join(f"{c:.2f}" for c in d[1:])
                     print(f"  person {d[0]:.2f}  u={u:.3f} v={v:.3f}  "
                           f"bearing={m.bearing(u):+5.1f}°  -> x={m.gaze_x(u):+.2f} "
-                          f"y={m.gaze_y(v):+.2f}", flush=True)
+                          f"y={m.gaze_y(v):+.2f}  box {box}", flush=True)
             frames += 1
             if time.monotonic() - t_log >= 60:
                 print(f"[cam] {frames / (time.monotonic() - t_log):.1f} detections/s", flush=True)
