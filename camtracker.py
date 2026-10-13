@@ -721,6 +721,12 @@ class CamTracker:
             pass
 
 
+def frame_detail(frame):
+    """How much is in a picture (pixel spread): ~0 for a blank or grey frame,
+    tens for a real one. Sampled, so cheap on 4K."""
+    return float(frame[::8, ::8].std())
+
+
 def snapshot(cfg, detector, path):
     """One frame with the ROI, tiles and detections drawn (for setting up)."""
     import cv2
@@ -731,15 +737,20 @@ def snapshot(cfg, detector, path):
     seq, frame = 0, None
     while frame is None and time.monotonic() < deadline:
         seq, frame = g.latest(seq, timeout=1.0)
-    # the first frames can be smeared until the next keyframe (H.265 joined
-    # mid-GOP: "Could not find ref with POC"): take one from 2 s in
+    # the first frames can be grey until the next keyframe (H.265 joined
+    # mid-GOP: "Could not find ref with POC"): from 2 s in, wait for detail
     settle = time.monotonic() + 2.0
-    while frame is not None and time.monotonic() < settle:
+    while frame is not None and time.monotonic() < deadline:
+        if time.monotonic() >= settle and frame_detail(frame) >= 8:
+            break
         seq, newer = g.latest(seq, timeout=1.0)
         frame = frame if newer is None else newer
     g.stop()
     if frame is None:
         raise SystemExit("!! no frame from the camera in 45 s — check [camera] url / CAMERA_URL")
+    if frame_detail(frame) < 8:
+        print("[snap] !! the picture is still blank/grey: the stream isn't decoding "
+              "(try the camera's H.264 or a lower-resolution stream)", flush=True)
     h, w = frame.shape[:2]
     tiles = tile_boxes(cfg.roi, w, h, cfg.tiles)
     img = frame.copy()
@@ -779,7 +790,8 @@ def snapshot(cfg, detector, path):
         cv2.putText(img, f"{i / 10:.1f}", (x + 2, h - 2), cv2.FONT_HERSHEY_SIMPLEX,
                     0.35, (255, 255, 255), 1)
     cv2.imwrite(path, img)
-    print(f"[snap] {w}x{h}, {len(tiles)} tile(s), {n_people} person(s) -> {path}", flush=True)
+    print(f"[snap] {w}x{h}, detail {frame_detail(frame):.0f}, {len(tiles)} tile(s), "
+          f"{n_people} person(s) -> {path}", flush=True)
 
 
 def main(argv=None):

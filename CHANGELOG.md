@@ -19,8 +19,9 @@
 - `--snapshot` shows each box's score, draws near misses (just under
   `min_score`) in orange and ignored decorations in magenta, and prints each
   detection's box ready to paste into `ignore`.
-- `--snapshot` uses a frame from 2 s into the stream, not the first one,
-  which on H.265 can be smeared until the next keyframe.
+- `--snapshot` waits (from 2 s in) for a frame with detail rather than the
+  first one, which on H.265 can be grey until the next keyframe; it prints
+  the frame's detail and warns if the picture is still blank.
 - Logs which stream it is opening (password hidden); `--snapshot` waits 45 s
   so ffmpeg's own open timeout is reported.
 
