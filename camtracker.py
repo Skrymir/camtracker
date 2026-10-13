@@ -84,6 +84,9 @@ DEFAULTS = {
         "y_from_feet": "false",
         "y_far": "0.45",
         "y_near": "0.95",
+        # shape of the look-down between y_far and y_near: 1 = straight line,
+        # below 1 = more of the look early (walking up), less at the end
+        "y_curve": "1.0",
     },
     "tracking": {
         "smooth_factor": "0.5",
@@ -197,6 +200,9 @@ class Config:
         self.y_from_feet = cp.getboolean("mapping", "y_from_feet")
         self.y_far = cp.getfloat("mapping", "y_far")
         self.y_near = cp.getfloat("mapping", "y_near")
+        self.y_curve = cp.getfloat("mapping", "y_curve")
+        if self.y_curve <= 0:
+            raise ValueError(f"y_curve must be above 0: {self.y_curve}")
 
         self.smooth = min(1.0, max(0.01, cp.getfloat("tracking", "smooth_factor")))
         self.min_interval = 1.0 / max(1.0, cp.getfloat("tracking", "publish_hz"))
@@ -261,7 +267,8 @@ class Mapper:
         if not c.y_from_feet or c.y_near == c.y_far:
             return 0.0
         # feet near the bottom of the frame = close = look down (-1)
-        return -_clamp((v - c.y_far) / (c.y_near - c.y_far), 0.0, 1.0)
+        frac = _clamp((v - c.y_far) / (c.y_near - c.y_far), 0.0, 1.0)
+        return -(frac ** c.y_curve)
 
     def __call__(self, u, v):
         return self.gaze_x(u), self.gaze_y(v)

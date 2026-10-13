@@ -101,6 +101,13 @@ def test_look_down_from_feet():
     assert CT.Mapper(cfg()).gaze_y(1.0) == 0.0          # off by default
 
 
+def test_look_down_curve_moves_early_keeps_the_ends():
+    m = CT.Mapper(cfg(y_from_feet=True, y_far=0.3, y_near=1.0, y_curve=0.5))
+    assert m.gaze_y(0.3) == 0.0 and m.gaze_y(1.0) == -1.0
+    assert m.gaze_y(0.475) == pytest.approx(-0.5)     # a quarter of the way: half the look
+    assert m.gaze_y(0.65) == pytest.approx(-(0.5 ** 0.5))
+
+
 # -- who to look at ----------------------------------------------------------
 def test_pick_nearest_person_then_keeps_following():
     far, near = box(0.2, h=0.1), box(0.7, h=0.4)

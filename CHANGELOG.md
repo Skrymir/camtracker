@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- `[mapping] y_curve`: shapes the look-down from `y_from_feet`. Below 1, the
+  eyes start looking down sooner as someone walks up, with the same
+  fully-down spot.
+
 ## 0.2.0 — 2026-10-12
 
 First version running for real (Unraid, Reolink RLC-810WA main stream, USB
