@@ -1,6 +1,9 @@
 # Changelog
 
-## Unreleased
+## 0.2.0 — 2026-10-12
+
+First version running for real (Unraid, Reolink RLC-810WA main stream, USB
+Coral), feeding demoneye in place of the mmWave bridge.
 
 - A single missed detection no longer moves the eyes to someone else in view:
   the followed person is waited for up to `lost_after_s` before switching.
