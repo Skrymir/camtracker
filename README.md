@@ -98,12 +98,14 @@ docker run --rm --device-cgroup-rule='c 189:* rmw' -v /dev/bus/usb:/dev/bus/usb 
 ```
 
 Open `snap.jpg` (it's in the appdata share). Yellow = the ROI, blue = the
-detection tiles, red = people found (with their score), orange = near misses
+detection tiles (cyan = the finer `far_roi` tiles, if set), red = people found (with their score), orange = near misses
 just under `min_score`, magenta = ignored decorations, with a 0.1-0.9 ruler
 along the bottom. Each detection is also printed with its `box`: put a
 decoration's box in `[detector] ignore` so the eyes don't stare at it. Set
-`roi` to a strip over your side of the street (skip the sky and your yard)
-and take another snapshot.
+`roi` to the part people walk in (skip the sky) and take another snapshot.
+If people far away are missed while `roi` is tall, add `far_roi` over the far
+strip: it is searched again with smaller tiles, so distant people look bigger
+to the model.
 
 ### 5. Calibrate (watch)
 

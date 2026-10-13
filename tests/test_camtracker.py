@@ -317,3 +317,32 @@ def test_ssd_people_min_score_override():
     args = ([(0.1, 0.1, 0.9, 0.2)], [0], [0.35], 1, (0, 0, 100, 100), 100, 100, c)
     assert CT.ssd_people(*args) == []
     assert len(CT.ssd_people(*args, min_score=0.3)) == 1
+
+
+# -- near and far ----------------------------------------------------------------
+def test_far_roi_adds_finer_tiles():
+    c = cfg(roi=[0, 0.05, 1, 1], far_roi=None, tiles=0)
+    assert len(CT.frame_tiles(c, 3840, 2160)) == 2
+    c.far_roi = [0, 0.05, 1, 0.6]
+    tiles = CT.frame_tiles(c, 3840, 2160)
+    assert len(tiles) == 5
+    assert all(t[3] <= int(0.6 * 2160) for t in tiles[2:])      # far tiles stay in the strip
+
+
+def test_far_roi_config(tmp_path):
+    p = tmp_path / "c.ini"
+    p.write_text("[camera]\nroi = 0, 0.05, 1, 1\nfar_roi = 0, 0.05, 1, 0.6\n")
+    assert CT.Config(str(p)).far_roi == [0, 0.05, 1, 0.6]
+    assert CT.Config(None).far_roi is None
+    p.write_text("[camera]\nfar_roi = 0, 0.7, 1, 0.6\n")
+    with pytest.raises(ValueError):
+        CT.Config(str(p))
+
+
+def test_top_of_a_near_person_merged_into_them():
+    near = (0.7, 0.40, 0.30, 0.50, 0.95)          # whole person, from the big tiles
+    top = (0.9, 0.41, 0.30, 0.49, 0.60)           # the far strip's cut-off view of them
+    far = (0.8, 0.10, 0.10, 0.13, 0.25)           # someone else, far away
+    assert CT.drop_contained([top, near, far]) == [near, far]
+    side_by_side = (0.8, 0.52, 0.30, 0.62, 0.95)
+    assert len(CT.drop_contained([near, side_by_side])) == 2

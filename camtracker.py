@@ -49,6 +49,9 @@ DEFAULTS = {
         "detect_fps": "12",
         # region of interest, fractions of the frame: x1, y1, x2, y2
         "roi": "0, 0, 1, 1",
+        # optional second, finer pass over where people are far away (small
+        # in the picture): x1, y1, x2, y2 like roi, tiled on its own
+        "far_roi": "",
         # model passes across the ROI: auto = enough for roughly square tiles
         "tiles": "auto",
     },
@@ -109,6 +112,14 @@ def _floats(text, n=None, what="value"):
     return vals
 
 
+def _region(text, what):
+    r = _floats(text, 4, what)
+    x1, y1, x2, y2 = r
+    if not (0 <= x1 < x2 <= 1 and 0 <= y1 < y2 <= 1):
+        raise ValueError(f"{what} must be x1,y1,x2,y2 inside 0..1 with x1<x2, y1<y2: {r}")
+    return r
+
+
 def parse_boxes(text):
     """'0.1, 0.2, 0.3, 0.4; 0.5, ...' -> [(0.1, 0.2, 0.3, 0.4), ...]."""
     boxes = []
@@ -154,10 +165,9 @@ class Config:
         g = lambda s, k: cp.get(s, k).strip()          # noqa: E731
         self.url = os.environ.get("CAMERA_URL") or g("camera", "url")
         self.detect_fps = max(1.0, cp.getfloat("camera", "detect_fps"))
-        self.roi = _floats(g("camera", "roi"), 4, "roi")
-        x1, y1, x2, y2 = self.roi
-        if not (0 <= x1 < x2 <= 1 and 0 <= y1 < y2 <= 1):
-            raise ValueError(f"roi must be x1,y1,x2,y2 inside 0..1 with x1<x2, y1<y2: {self.roi}")
+        self.roi = _region(g("camera", "roi"), "roi")
+        far = g("camera", "far_roi")
+        self.far_roi = _region(far, "far_roi") if far else None
         t = g("camera", "tiles").lower()
         self.tiles = 0 if t in ("", "auto") else max(1, int(t))
 
@@ -289,6 +299,21 @@ def nms(dets, thresh=0.5):
     return keep
 
 
+def drop_contained(dets, thresh=0.7):
+    """Drop a box that lies mostly (thresh of its area) inside a bigger one:
+    the finer far_roi pass sees only the top of someone near the camera."""
+    def area(d):
+        return (d[3] - d[1]) * (d[4] - d[2])
+    keep = []
+    for d in sorted(dets, key=area, reverse=True):
+        a = area(d)
+        inside = lambda k: (max(0.0, min(d[3], k[3]) - max(d[1], k[1]))      # noqa: E731
+                            * max(0.0, min(d[4], k[4]) - max(d[2], k[2])))
+        if a <= 0 or all(inside(k) / a < thresh for k in keep):
+            keep.append(d)
+    return keep
+
+
 def ssd_people(boxes, classes, scores, count, tile, frame_w, frame_h, cfg, min_score=None):
     """One tile's SSD output (boxes as ymin, xmin, ymax, xmax fractions of the
     tile) -> the people in it, [(score, x1, y1, x2, y2)] as frame fractions.
@@ -331,6 +356,14 @@ def tile_boxes(roi, frame_w, frame_h, tiles=0, overlap=0.15):
         b = x2 if i == n - 1 else min(x2, int(round(a + tw)))
         out.append((a, y1, b, y2))
     return out
+
+
+def frame_tiles(cfg, frame_w, frame_h):
+    """The tiles for one frame: the ROI's, then far_roi's (finer) if set."""
+    tiles = tile_boxes(cfg.roi, frame_w, frame_h, cfg.tiles)
+    if cfg.far_roi:
+        tiles += tile_boxes(cfg.far_roi, frame_w, frame_h)
+    return tiles
 
 
 class Tracker:
@@ -541,7 +574,7 @@ class CoralDetector:
             boxes, classes, scores, count = (self.interp.get_tensor(i)[0] for i in self._outputs)
             out += ssd_people(boxes, classes, scores, int(count), tile, fw, fh, self.cfg,
                               min_score)
-        return nms(out)
+        return drop_contained(nms(out))
 
 
 # ------------------------------------------------------------------- service
@@ -676,7 +709,7 @@ class CamTracker:
                 continue
             if tiles is None:
                 h, w = frame.shape[:2]
-                tiles = tile_boxes(self.cfg.roi, w, h, self.cfg.tiles)
+                tiles = frame_tiles(self.cfg, w, h)
                 print(f"[cam] frame {w}x{h}, {len(tiles)} tile(s): {tiles}", flush=True)
             dets = drop_ignored(self.detector.detect(frame, tiles), self.cfg.ignore,
                                 self.cfg.ignore_iou)
@@ -752,12 +785,14 @@ def snapshot(cfg, detector, path):
         print("[snap] !! the picture is still blank/grey: the stream isn't decoding "
               "(try the camera's H.264 or a lower-resolution stream)", flush=True)
     h, w = frame.shape[:2]
-    tiles = tile_boxes(cfg.roi, w, h, cfg.tiles)
+    tiles = frame_tiles(cfg, w, h)
+    n_main = len(tile_boxes(cfg.roi, w, h, cfg.tiles))
     img = frame.copy()
     k = w / 640                                     # drawing scale: readable at 4K too
     thin, thick = max(1, round(k)), max(2, round(2 * k))
-    for (x1, y1, x2, y2) in tiles:
-        cv2.rectangle(img, (x1, y1), (x2, y2), (255, 160, 0), thin)
+    for i, (x1, y1, x2, y2) in enumerate(tiles):    # roi tiles blue, far_roi tiles cyan
+        cv2.rectangle(img, (x1, y1), (x2, y2), (255, 160, 0) if i < n_main else (255, 255, 0),
+                      thin)
     r = cfg.roi
     cv2.rectangle(img, (int(r[0] * w), int(r[1] * h)), (int(r[2] * w), int(r[3] * h)),
                   (0, 200, 255), thick)

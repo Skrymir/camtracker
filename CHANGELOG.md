@@ -13,6 +13,9 @@
 - The Coral works on the first start after a reboot: the container mounts the
   live `/dev/bus/usb` with a cgroup rule for USB devices, instead of a
   `--device` list that goes stale when the Coral changes its USB ID.
+- `[camera] far_roi`: an optional second, finer pass over where people are
+  far away, so `roi` can cover the whole height for people near the camera.
+  The top of a near person seen by the far pass is merged into them.
 - `[detector] ignore`: boxes for decorations the model takes for people (a
   ghost, a skeleton). A detection that matches one (IoU >= `ignore_iou`) is
   dropped; someone walking past it is still seen.
