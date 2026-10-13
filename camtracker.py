@@ -731,6 +731,12 @@ def snapshot(cfg, detector, path):
     seq, frame = 0, None
     while frame is None and time.monotonic() < deadline:
         seq, frame = g.latest(seq, timeout=1.0)
+    # the first frames can be smeared until the next keyframe (H.265 joined
+    # mid-GOP: "Could not find ref with POC"): take one from 2 s in
+    settle = time.monotonic() + 2.0
+    while frame is not None and time.monotonic() < settle:
+        seq, newer = g.latest(seq, timeout=1.0)
+        frame = frame if newer is None else newer
     g.stop()
     if frame is None:
         raise SystemExit("!! no frame from the camera in 45 s — check [camera] url / CAMERA_URL")
