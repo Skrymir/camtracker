@@ -34,7 +34,7 @@ RUN mkdir -p /models && curl -fsSL -o /models/ssdlite_mobiledet_coco_qat_postpro
         https://github.com/google-coral/test_data/raw/release-frogfish/ssdlite_mobiledet_coco_qat_postprocess_edgetpu.tflite
 
 WORKDIR /app
-COPY camtracker.py status.py web.py ./
+COPY camtracker.py status.py web.py web.html ./
 COPY camtracker.ini /app/camtracker.ini.example
 
 # The live view ([web] port)

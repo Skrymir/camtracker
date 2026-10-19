@@ -3,6 +3,7 @@ clear messages it sends. Pure logic: no OpenCV, Coral or broker needed."""
 import math
 import threading
 import time
+import json
 import urllib.error
 import urllib.request
 
@@ -38,7 +39,7 @@ def test_template_loads_and_matches_defaults():
     d = CT.Config(None)
     for k in ("roi", "tiles", "hfov", "gaze_max", "points", "smooth", "hold", "topic",
               "command_topic", "status_base", "status_node", "min_score", "model",
-              "web_port", "web_fps", "web_width"):
+              "web_port", "web_fps", "web_width", "web_edit"):
         assert getattr(c, k) == getattr(d, k), k
     assert c.status_node == "camera"
 
@@ -567,3 +568,123 @@ def test_render_view_draws_and_encodes():
              "ignored": [], "follow": p, "status": "show on"}
     small, full = CT.render_view(c, state, 1280), CT.render_view(c, state)
     assert small[:2] == full[:2] == b"\xff\xd8" and len(small) < len(full)
+
+
+# -- zone editor -----------------------------------------------------------------
+INI = """# top comment
+[camera]
+# where to look
+roi = 0, 0, 1, 1
+far_roi =
+tiles = auto
+
+[detector]
+# masks from Frigate
+ignore_masks = 0.1,0.1,0.2,0.1,0.2,0.2
+  0.5,0.5,0.6,0.5,0.6,0.6
+ignore_inside = 0.6
+"""
+
+
+def test_set_ini_values_keeps_the_rest_of_the_file():
+    new = CT.set_ini_values(INI, {"camera": {"roi": "0, 0.1, 1, 0.9", "far_roi": ""},
+                                  "detector": {"ignore_masks": "0.3,0.3,0.4,0.3,0.4,0.4"}})
+    assert new == INI.replace("roi = 0, 0, 1, 1", "roi = 0, 0.1, 1, 0.9").replace(
+        "ignore_masks = 0.1,0.1,0.2,0.1,0.2,0.2\n  0.5,0.5,0.6,0.5,0.6,0.6",
+        "ignore_masks = 0.3,0.3,0.4,0.3,0.4,0.4")
+
+
+def test_set_ini_values_adds_missing_keys_and_sections():
+    new = CT.set_ini_values("[camera]\nurl =\n\n[mqtt]\nport = 1\n",
+                            {"camera": {"far_roi": "0, 0, 1, 0.5"},
+                             "detector": {"ignore_masks": ""}})
+    assert new == ("[camera]\nurl =\nfar_roi = 0, 0, 1, 0.5\n\n[mqtt]\nport = 1\n"
+                   "\n[detector]\nignore_masks =\n")
+    assert "#roi = 1" in CT.set_ini_values("[camera]\n#roi = 1\n", {"camera": {"roi": "2"}})
+
+
+def test_zones_round_trip_through_the_config(tmp_path):
+    p = tmp_path / "c.ini"
+    p.write_text(INI)
+    c = CT.Config(str(p))
+    z = CT.zones(c)
+    assert z["far_roi"] is None and len(z["ignore_masks"]) == 2
+    z["roi"], z["far_roi"] = [0, 0.1, 1, 0.95], [0, 0.1, 1, 0.5]
+    z["ignore_masks"] = [[[0.7, 0.1], [0.8, 0.1], [0.8, 0.3123456]]]
+    CT.write_zones(str(p), *CT.parse_zones(z))
+    assert (tmp_path / "c.ini.bak").read_text() == INI
+    c2 = CT.Config(str(p))
+    assert c2.roi == [0, 0.1, 1, 0.95] and c2.far_roi == [0, 0.1, 1, 0.5]
+    assert c2.ignore_masks == [[(0.7, 0.1), (0.8, 0.1), (0.8, 0.312)]]
+    assert "# masks from Frigate" in p.read_text() and "tiles = auto" in p.read_text()
+
+
+def test_parse_zones_rejects_what_the_config_would():
+    good = {"roi": [0, 0, 1, 1], "far_roi": None, "ignore_masks": []}
+    assert CT.parse_zones(good) == ([0, 0, 1, 1], None, [])
+    for bad in ({}, dict(good, roi=[0.5, 0, 0.4, 1]), dict(good, roi="x"),
+                dict(good, ignore_masks=[[[0.1, 0.1], [0.2, 0.2]]]),
+                dict(good, ignore_masks=[[[0.1, 0.1], [2, 0.2], [0.3, 0.3]]])):
+        with pytest.raises(ValueError):
+            CT.parse_zones(bad)
+
+
+def test_new_zones_are_used_from_the_next_frame():
+    grab = LoopGrabber()
+    s = CT.CamTracker(cfg(status_enabled=False, detect_fps=100), FakeDetector([]),
+                      grabber=grab, watch=True)
+    tiles = []
+    s.detector.detect_raw = lambda f, t, m=None: tiles.append(t) or []
+    run = threading.Thread(target=s.run, daemon=True)
+    run.start()
+    time.sleep(0.1)
+    s.set_zones([0, 0.5, 1, 1], None, [])
+    time.sleep(0.1)
+    s.stop()
+    run.join(2)
+    assert tiles[0][0][1] == 0 and tiles[-1][0][1] == 360       # y1 of the roi, in pixels
+
+
+def post(url, body, headers=None):
+    req = urllib.request.Request(url, data=json.dumps(body).encode(), method="POST",
+                                 headers=dict({"Content-Type": "application/json"},
+                                              **(headers or {})))
+    try:
+        with urllib.request.urlopen(req) as r:
+            return r.status, json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        return e.code, json.loads(e.read())
+
+
+def test_web_zones_read_and_save():
+    saved = []
+
+    def save(data):
+        if data.get("roi") == "bad":
+            raise ValueError("roi must be ...")
+        saved.append(data)
+        return {"roi": data["roi"]}
+    v = web.LiveView(lambda s, w, overlay=True: f"{s}:{overlay}".encode(),
+                     get_zones=lambda: {"roi": [0, 0, 1, 1]}, save_zones=save)
+    srv = web.serve(v, 0, host="127.0.0.1")
+    base = f"http://127.0.0.1:{srv.server_address[1]}"
+    try:
+        z = json.loads(urllib.request.urlopen(base + "/zones.json").read())
+        assert z == {"roi": [0, 0, 1, 1], "editable": True}
+        assert post(base + "/zones", {"roi": [0, 0.1, 1, 1]}) == (200, {"roi": [0, 0.1, 1, 1]})
+        assert post(base + "/zones", {"roi": "bad"}) == (400, {"error": "roi must be ..."})
+        # another site's page, or a plain form post, can't save
+        assert post(base + "/zones", {"roi": [0, 0, 1, 1]},
+                    {"Origin": "http://evil.example"})[0] == 403
+        assert post(base + "/zones", {"roi": [0, 0, 1, 1]},
+                    {"Content-Type": "application/x-www-form-urlencoded"})[0] == 403
+        assert post(base + "/zones", {"roi": [0, 0, 1, 1]},
+                    {"Origin": base})[0] == 200
+        assert len(saved) == 2
+        threading.Timer(0.05, v.offer, ["f"]).start()
+        assert urllib.request.urlopen(base + "/frame.jpg").read() == b"f:False"
+        v.save_zones = None                                   # [web] edit = false
+        assert json.loads(urllib.request.urlopen(base + "/zones.json").read())["editable"] is False
+        assert post(base + "/zones", {"roi": [0, 0, 1, 1]})[0] == 403
+    finally:
+        srv.shutdown()

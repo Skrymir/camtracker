@@ -37,6 +37,7 @@ import json
 import math
 import os
 import re
+import shutil
 import signal
 import socket
 import sys
@@ -116,6 +117,8 @@ DEFAULTS = {
         # the stream's frame rate and width (it's scaled down, to save CPU)
         "fps": "5",
         "width": "1280",
+        # edit roi, far_roi and the ignore masks on the page (saved here)
+        "edit": "true",
     },
     "status": dict(status.STATUS_DEFAULTS, node="camera", refresh_s="60",
                    last_seen_every_s="10"),
@@ -190,6 +193,103 @@ def parse_points(text):
     return pts
 
 
+# -- zones: roi, far_roi and ignore_masks, as the live view edits them --------
+def _num(v):
+    return f"{round(float(v), 3):g}"
+
+
+def format_region(r):
+    return ", ".join(_num(v) for v in r) if r else ""
+
+
+def format_masks(masks):
+    """[[(x, y), ...], ...] -> Frigate's form, "x,y,x,y,...; ..."."""
+    return "; ".join(",".join(_num(c) for p in m for c in p) for m in masks)
+
+
+def zones(cfg):
+    """The zones as JSON for the editor (ignore boxes are shown, not edited)."""
+    return {"roi": list(cfg.roi), "far_roi": list(cfg.far_roi) if cfg.far_roi else None,
+            "ignore_masks": [[list(p) for p in m] for m in cfg.ignore_masks],
+            "ignore": [list(b) for b in cfg.ignore]}
+
+
+def parse_zones(data):
+    """The editor's JSON -> (roi, far_roi or None, masks), checked as if read
+    from the config (so what's saved always loads). ValueError if not."""
+    try:
+        roi = _region(format_region(data["roi"]), "roi")
+        far = data.get("far_roi")
+        far = _region(format_region(far), "far_roi") if far else None
+        masks = parse_masks(format_masks(data.get("ignore_masks") or []))
+    except (KeyError, TypeError, AttributeError) as e:
+        raise ValueError(f"bad zones: {e!r}") from None
+    return roi, far, masks
+
+
+def set_ini_values(text, values):
+    """Set keys in an ini file's text, keeping everything else (comments,
+    order, other keys) as it is. values: {section: {key: value}}. A key's
+    indented continuation lines go with it; a missing key is added at the end
+    of its section, a missing section at the end of the file."""
+    lines = text.splitlines()
+    out, section, skipping, done = [], None, False, set()
+
+    def finish(sec):                             # add the section's missing keys
+        missing = [(k, v) for k, v in values.get(sec, {}).items() if (sec, k) not in done]
+        if not missing:
+            return
+        at = len(out)
+        while at > 0 and not out[at - 1].strip():
+            at -= 1
+        out[at:at] = [f"{k} = {v}".rstrip() for k, v in missing]
+        done.update((sec, k) for k, _ in missing)
+
+    for line in lines:
+        if skipping and line[:1].isspace() and line.strip():
+            continue                             # the old value's continuation
+        skipping = False
+        m = re.match(r"\[([^\]]+)\]\s*$", line)
+        if m:
+            finish(section)
+            section = m.group(1).strip()
+            out.append(line)
+            continue
+        m = re.match(r"([^\s#;=:][^=:]*?)\s*[=:]", line)
+        if m and section in values and m.group(1) in values[section]:
+            key = m.group(1)
+            out.append(f"{key} = {values[section][key]}".rstrip())
+            done.add((section, key))
+            skipping = True
+            continue
+        out.append(line)
+    finish(section)
+    for sec in values:
+        if any((sec, k) not in done for k in values[sec]):
+            out += ["", f"[{sec}]"] + [f"{k} = {v}".rstrip() for k, v in values[sec].items()]
+    return "\n".join(out) + "\n"
+
+
+def write_zones(path, roi, far_roi, masks):
+    """Save the zones into the config file (a copy of the old one goes to
+    <path>.bak), replacing it in one go so a crash can't leave half a file."""
+    old = ""
+    if os.path.exists(path):
+        with open(path) as f:
+            old = f.read()
+        with open(path + ".bak", "w") as f:
+            f.write(old)
+    new = set_ini_values(old, {"camera": {"roi": format_region(roi),
+                                          "far_roi": format_region(far_roi)},
+                               "detector": {"ignore_masks": format_masks(masks)}})
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        f.write(new)
+    if old:
+        shutil.copymode(path, tmp)
+    os.replace(tmp, path)
+
+
 class Config:
     def __init__(self, path=None):
         cp = configparser.ConfigParser()
@@ -251,6 +351,7 @@ class Config:
         self.web_port = cp.getint("web", "port")
         self.web_fps = cp.getfloat("web", "fps")
         self.web_width = cp.getint("web", "width")
+        self.web_edit = cp.getboolean("web", "edit")
 
         st = status.load_section(cp, "status")
         self.status_enabled = st["enabled"]
@@ -715,6 +816,7 @@ class CamTracker:
         self._seen_pub = None
         self._lock = threading.RLock()
         self._stop = threading.Event()
+        self._retile = False
         self._host = status.hostname()
 
     # -- MQTT --
@@ -799,6 +901,14 @@ class CamTracker:
             self.status.publish_last_seen()
             self._seen_pub = now
 
+    def set_zones(self, roi, far_roi, masks):
+        """New zones (the live view's editor), used from the next frame."""
+        with self._lock:
+            self.cfg.roi, self.cfg.far_roi, self.cfg.ignore_masks = roi, far_roi, masks
+            self._retile = True
+        print(f"[cfg] zones: roi {format_region(roi)}, far_roi {format_region(far_roi) or '-'}, "
+              f"{len(masks)} mask(s)", flush=True)
+
     # -- main loop --
     def run(self):
         tiles, seq, frames, t_log = None, 0, 0, time.monotonic()
@@ -820,7 +930,8 @@ class CamTracker:
                 with self._lock:
                     self._send(self.tracker.tick())
                 continue
-            if tiles is None:
+            if tiles is None or self._retile:
+                self._retile = False
                 h, w = frame.shape[:2]
                 tiles = frame_tiles(self.cfg, w, h)
                 print(f"[cam] frame {w}x{h}, {len(tiles)} tile(s): {tiles}", flush=True)
@@ -947,8 +1058,9 @@ def view_status(enabled, have, sx, sy, rate):
     return f"{show} | {who} | {rate:.0f} det/s" if enabled else f"{show} | {rate:.0f} det/s"
 
 
-def render_view(cfg, state, width=None):
-    """A live view frame (state from the loop) as JPEG, scaled to width."""
+def render_view(cfg, state, width=None, overlay=True):
+    """A live view frame (state from the loop) as JPEG, scaled to width, with
+    what the tracker sees drawn on it (unless overlay is False)."""
     import cv2
     frame = state["frame"]
     fh, fw = frame.shape[:2]
@@ -956,8 +1068,9 @@ def render_view(cfg, state, width=None):
         img = cv2.resize(frame, (width, round(fh * width / fw)), interpolation=cv2.INTER_AREA)
     else:
         img = frame.copy()
-    draw_overlay(img, cfg, fw, fh, state["people"], state["near"], state["ignored"],
-                 state["follow"], state["status"])
+    if overlay:
+        draw_overlay(img, cfg, fw, fh, state["people"], state["near"], state["ignored"],
+                     state["follow"], state["status"])
     return cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 80])[1].tobytes()
 
 
@@ -1028,8 +1141,9 @@ def main(argv=None):
 
     view = None
     if cfg.web_port:
-        view = web.LiveView(lambda state, width: render_view(cfg, state, width),
-                            fps=cfg.web_fps, width=cfg.web_width)
+        view = web.LiveView(lambda state, width, overlay=True: render_view(cfg, state, width,
+                                                                            overlay),
+                            fps=cfg.web_fps, width=cfg.web_width, get_zones=lambda: zones(cfg))
         try:
             web.serve(view, cfg.web_port)
             print(f"[web] live view on port {cfg.web_port}: "
@@ -1039,6 +1153,13 @@ def main(argv=None):
                   flush=True)
             view = None
     t = CamTracker(cfg, detector, publish=not args.no_publish, watch=args.watch, view=view)
+    if view and cfg.web_edit:
+        def save(data):
+            roi, far, masks = parse_zones(data)
+            write_zones(args.config, roi, far, masks)
+            t.set_zones(roi, far, masks)
+            return zones(cfg)
+        view.save_zones = save
 
     def _sigterm(*_):
         t.stop()

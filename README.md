@@ -120,9 +120,18 @@ Or use the **live view** (once it's running, step 6):
 `http://<server>:8080/`, or *WebUI* on the container in Unraid's Docker
 tab. It's the same drawing on the live picture, with the person being
 followed in green and the show state and x/y along the top, and it works with
-the show off. Edit `camtracker.ini`, restart the container, and look again;
-*Full-resolution frame* on the page gives one 4K frame. Nothing is drawn
-while nobody is looking. `[web] port = 0` turns it off.
+the show off. *Full-resolution frame* on the page gives one 4K frame.
+Nothing is drawn while nobody is looking. `[web] port = 0` turns it off.
+
+**Edit zones** on that page sets `roi`, `far_roi` and the ignore masks by
+hand, over a still frame: drag a box's corners or the box itself; *Add mask*,
+then click around a decoration and click the first point to close it; drag a
+mask's points, drag the small midpoints to add one, double-click a point to
+remove it. *Save* writes them into `camtracker.ini` (only those lines; the old
+file goes to `camtracker.ini.bak`) and the tracker uses them at once, no
+restart. Masks are in Frigate's form, so ones pasted from Frigate show up to
+edit too. Anyone who can open the page can save: `[web] edit = false` makes it
+view-only.
 
 ### 5. Calibrate (watch)
 

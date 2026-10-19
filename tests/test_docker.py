@@ -12,7 +12,7 @@ def test_dockerfile_paho_matches_requirements():
 
 def test_dockerfile_copies_what_camtracker_imports():
     df, ignore = Path("Dockerfile").read_text(), Path(".dockerignore").read_text()
-    for f in ("camtracker.py", "status.py", "web.py"):
+    for f in ("camtracker.py", "status.py", "web.py", "web.html"):
         assert f in df and f"!{f}" in ignore
 
 

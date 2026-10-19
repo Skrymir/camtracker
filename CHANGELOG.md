@@ -8,6 +8,11 @@
   (the camera is read while someone is looking), costs nothing while nobody
   is, and is the container's WebUI in Unraid. Tracking is unchanged: near
   misses are found beside it, not instead.
+- Zone editor on the live view (*Edit zones*): drag `roi` / `far_roi` and
+  draw, move and reshape ignore masks over a still frame. *Save* rewrites
+  just those lines of `camtracker.ini` (keeping a `.bak`) and they're used at
+  once. `[web] edit = false` makes the page view-only. Saving only works from
+  the page itself (JSON, same host), not from another site.
 - `[detector] ignore_masks`: decorations can be drawn as polygons in
   Frigate's mask editor and its coordinates pasted in as they are. A
   detection with `ignore_inside` (default 0.6) of its box inside a mask is
