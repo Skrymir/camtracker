@@ -319,6 +319,42 @@ def test_decoration_dropped_person_walking_past_kept():
     assert CT.drop_ignored([seen_ghost], []) == [seen_ghost]
 
 
+def test_ignore_masks_parse_frigate_coordinates(tmp_path):
+    frigate = "0.782,0.131,0.831,0.131,0.831,0.289,0.782,0.289"
+    sq = [(0.782, 0.131), (0.831, 0.131), (0.831, 0.289), (0.782, 0.289)]
+    assert CT.parse_masks(frigate) == [sq]
+    assert CT.parse_masks(f"{frigate}; 0.1,0.1,0.2,0.1,0.15,0.2") == [
+        sq, [(0.1, 0.1), (0.2, 0.1), (0.15, 0.2)]]
+    assert CT.parse_masks("") == []
+    for bad in ("0.1,0.1,0.2,0.2", "0.1,0.1,0.2,0.2,0.3", "120,40,300,40,300,200"):
+        with pytest.raises(ValueError):
+            CT.parse_masks(bad)
+    p = tmp_path / "c.ini"
+    p.write_text(f"[detector]\nignore_masks = {frigate}\n  0.1,0.1,0.2,0.1,0.15,0.2\n")
+    assert len(CT.Config(str(p)).ignore_masks) == 2
+
+
+def test_inside_fraction():
+    sq = [(0.2, 0.2), (0.6, 0.2), (0.6, 0.6), (0.2, 0.6)]
+    assert CT.inside_fraction((0.3, 0.3, 0.4, 0.4), sq) == pytest.approx(1.0)
+    assert CT.inside_fraction((0.5, 0.3, 0.7, 0.4), sq) == pytest.approx(0.5)
+    assert CT.inside_fraction((0.7, 0.7, 0.8, 0.8), sq) == 0.0
+    tri = [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0)]              # half the box, diagonally
+    assert CT.inside_fraction((0.0, 0.0, 1.0, 1.0), tri) == pytest.approx(0.5)
+    ell = [(0, 0), (1, 0), (1, 0.5), (0.5, 0.5), (0.5, 1), (0, 1)]  # concave L
+    assert CT.inside_fraction((0.5, 0.5, 1.0, 1.0), ell) == pytest.approx(0.0)
+    assert CT.inside_fraction((0.0, 0.0, 1.0, 1.0), ell) == pytest.approx(0.75)
+
+
+def test_decoration_in_mask_dropped_person_walking_past_kept():
+    mask = [(0.77, 0.12), (0.84, 0.12), (0.84, 0.30), (0.77, 0.30)]  # drawn a bit loose
+    seen_ghost = (0.8, 0.785, 0.135, 0.828, 0.288)
+    passer_by = (0.9, 0.76, 0.10, 0.80, 0.40)
+    elsewhere = (0.9, 0.40, 0.10, 0.45, 0.30)
+    assert CT.drop_ignored([seen_ghost, passer_by, elsewhere], [], masks=[mask]) == [
+        passer_by, elsewhere]
+
+
 def test_ssd_people_min_score_override():
     c = cfg(person_id=0, min_score=0.5, min_height=0.0)
     args = ([(0.1, 0.1, 0.9, 0.2)], [0], [0.35], 1, (0, 0, 100, 100), 100, 100, c)

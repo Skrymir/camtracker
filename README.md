@@ -101,7 +101,10 @@ Open `snap.jpg` (it's in the appdata share). Yellow = the ROI, blue = the
 detection tiles (cyan = the finer `far_roi` tiles, if set), red = people found (with their score), orange = near misses
 just under `min_score`, magenta = ignored decorations, with a 0.1-0.9 ruler
 along the bottom. Each detection is also printed with its `box`: put a
-decoration's box in `[detector] ignore` so the eyes don't stare at it. Set
+decoration's box in `[detector] ignore` so the eyes don't stare at it, or
+draw a snug mask around it in Frigate's mask editor (Settings → Masks / Zones
+→ Object masks) and paste its coordinates into `ignore_masks`; masks are drawn
+in magenta too. Set
 `roi` to the part people walk in (skip the sky) and take another snapshot.
 If people far away are missed while `roi` is tall, add `far_roi` over the far
 strip: it is searched again with smaller tiles, so distant people look bigger

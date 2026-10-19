@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- `[detector] ignore_masks`: decorations can be drawn as polygons in
+  Frigate's mask editor and its coordinates pasted in as they are. A
+  detection with `ignore_inside` (default 0.6) of its box inside a mask is
+  dropped. `--snapshot` draws the masks in magenta. `ignore` boxes still work.
+
 ## 0.2.1 — 2026-10-12
 
 - `[mapping] y_curve`: shapes the look-down from `y_from_feet`. Below 1, the

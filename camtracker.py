@@ -68,6 +68,11 @@ DEFAULTS = {
         "ignore": "",
         # a detection overlapping an ignore box at least this much (IoU) is it
         "ignore_iou": "0.5",
+        # regions drawn in Frigate's mask editor, its coordinates pasted as is:
+        # "x1,y1,x2,y2,x3,y3,...; ..." (points as frame fractions)
+        "ignore_masks": "",
+        # a detection with at least this much of its box inside a mask is dropped
+        "ignore_inside": "0.6",
     },
     "mqtt": {"host": "192.168.86.5", "port": "1883", "username": "", "password": "",
              "target_topic": "house/tracking/target",
@@ -136,6 +141,23 @@ def parse_boxes(text):
     return boxes
 
 
+def parse_masks(text):
+    """Frigate mask coordinates, one mask per line or ";":
+    '0.1,0.2,0.3,0.2,0.3,0.4; ...' -> [[(0.1, 0.2), (0.3, 0.2), (0.3, 0.4)], ...]."""
+    masks = []
+    for part in str(text or "").replace("\n", ";").split(";"):
+        if not part.strip():
+            continue
+        v = _floats(part, what="ignore mask")
+        if len(v) < 6 or len(v) % 2:
+            raise ValueError(f"ignore mask needs x,y pairs, at least 3 points: {part.strip()!r}")
+        if not all(0 <= c <= 1 for c in v):
+            raise ValueError("ignore mask points must be frame fractions 0..1 (Frigate 0.14+ "
+                             f"writes them so; older versions used pixels): {part.strip()!r}")
+        masks.append(list(zip(v[0::2], v[1::2])))
+    return masks
+
+
 def parse_points(text):
     """'0.1:-1, 0.5:0, 0.9:1' -> [(0.1, -1.0), (0.5, 0.0), (0.9, 1.0)] sorted by u."""
     pts = []
@@ -181,6 +203,8 @@ class Config:
         self.min_height = cp.getfloat("detector", "min_height")
         self.ignore = parse_boxes(g("detector", "ignore"))
         self.ignore_iou = cp.getfloat("detector", "ignore_iou")
+        self.ignore_masks = parse_masks(g("detector", "ignore_masks"))
+        self.ignore_inside = cp.getfloat("detector", "ignore_inside")
 
         self.mqtt_host = g("mqtt", "host")
         self.mqtt_port = cp.getint("mqtt", "port")
@@ -340,10 +364,41 @@ def ssd_people(boxes, classes, scores, count, tile, frame_w, frame_h, cfg, min_s
     return out
 
 
-def drop_ignored(dets, ignore, min_iou=0.5):
+def _clip(pts, axis, limit, low):
+    """The part of polygon pts on one side (x or y >= / <= limit) of a line."""
+    keep = (lambda p: p[axis] >= limit) if low else (lambda p: p[axis] <= limit)
+    out = []
+    for i, q in enumerate(pts):
+        p = pts[i - 1]
+        if keep(p) != keep(q):                      # an edge crossing the line
+            t = (limit - p[axis]) / (q[axis] - p[axis])
+            out.append((p[0] + t * (q[0] - p[0]), p[1] + t * (q[1] - p[1])))
+        if keep(q):
+            out.append(q)
+    return out
+
+
+def inside_fraction(box, poly):
+    """How much of box (x1, y1, x2, y2) lies inside polygon poly [(x, y), ...]:
+    the polygon is clipped to the box (Sutherland-Hodgman) and measured."""
+    x1, y1, x2, y2 = box
+    area = (x2 - x1) * (y2 - y1)
+    pts = list(poly)
+    for axis, limit, low in ((0, x1, True), (0, x2, False), (1, y1, True), (1, y2, False)):
+        if not pts or area <= 0:
+            return 0.0
+        pts = _clip(pts, axis, limit, low)
+    shoelace = sum(p[0] * q[1] - q[0] * p[1] for p, q in zip(pts, pts[1:] + pts[:1]))
+    return abs(shoelace) / 2 / area
+
+
+def drop_ignored(dets, ignore, min_iou=0.5, masks=(), min_inside=0.6):
     """Detections that aren't one of the ignore boxes (a decoration seen as a
-    person). Someone walking past one has a different box, so is kept."""
-    return [d for d in dets if all(iou(d[1:], b) < min_iou for b in ignore)]
+    person) or mostly inside an ignore mask. Someone walking past one has a
+    different, bigger box, so is kept."""
+    return [d for d in dets
+            if all(iou(d[1:], b) < min_iou for b in ignore)
+            and all(inside_fraction(d[1:], m) < min_inside for m in masks)]
 
 
 def tile_boxes(roi, frame_w, frame_h, tiles=0, overlap=0.15):
@@ -719,7 +774,8 @@ class CamTracker:
                 tiles = frame_tiles(self.cfg, w, h)
                 print(f"[cam] frame {w}x{h}, {len(tiles)} tile(s): {tiles}", flush=True)
             dets = drop_ignored(self.detector.detect(frame, tiles), self.cfg.ignore,
-                                self.cfg.ignore_iou)
+                                self.cfg.ignore_iou, self.cfg.ignore_masks,
+                                self.cfg.ignore_inside)
             with self._lock:
                 if self.enabled:
                     self._send(self.tracker.update(dets))
@@ -771,6 +827,7 @@ def frame_detail(frame):
 def snapshot(cfg, detector, path):
     """One frame with the ROI, tiles and detections drawn (for setting up)."""
     import cv2
+    import numpy as np
     g = FrameGrabber(cfg.url)
     g.start()
     # longer than ffmpeg's ~30 s open timeout, so its error is printed first
@@ -807,11 +864,14 @@ def snapshot(cfg, detector, path):
     for b in cfg.ignore:                            # ignore boxes: magenta
         cv2.rectangle(img, (int(b[0] * w), int(b[1] * h)), (int(b[2] * w), int(b[3] * h)),
                       (255, 0, 255), thin)
+    for poly in cfg.ignore_masks:                   # ignore masks: magenta too
+        pts = np.array([(int(x * w), int(y * h)) for x, y in poly], np.int32)
+        cv2.polylines(img, [pts], True, (255, 0, 255), thin)
     m = Mapper(cfg)
     # look a bit below min_score too, so near misses show (orange)
     low = max(0.2, cfg.min_score - 0.2)
     dets = detector.detect(frame, tiles, min_score=low) if detector else []
-    kept = drop_ignored(dets, cfg.ignore, cfg.ignore_iou)
+    kept = drop_ignored(dets, cfg.ignore, cfg.ignore_iou, cfg.ignore_masks, cfg.ignore_inside)
     n_people = 0
     for d in dets:
         u = (d[1] + d[3]) / 2
