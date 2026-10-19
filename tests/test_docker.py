@@ -12,7 +12,7 @@ def test_dockerfile_paho_matches_requirements():
 
 def test_dockerfile_copies_what_camtracker_imports():
     df, ignore = Path("Dockerfile").read_text(), Path(".dockerignore").read_text()
-    for f in ("camtracker.py", "status.py"):
+    for f in ("camtracker.py", "status.py", "web.py"):
         assert f in df and f"!{f}" in ignore
 
 
@@ -24,5 +24,8 @@ def test_unraid_template_runs_like_compose():
     assert "c 189:* rmw" in t.findtext("ExtraParams") and '"c 189:* rmw"' in compose
     paths = {c.get("Target"): c.text for c in t.iter("Config") if c.get("Type") == "Path"}
     assert paths == {"/config": "/mnt/user/appdata/camtracker", "/dev/bus/usb": "/dev/bus/usb"}
+    ports = {c.get("Target") for c in t.iter("Config") if c.get("Type") == "Port"}
+    assert ports == {"8080"} and "[PORT:8080]" in t.findtext("WebUI")
+    assert '"8080:8080"' in compose and "EXPOSE 8080" in Path("Dockerfile").read_text()
     env = {c.get("Target") for c in t.iter("Config") if c.get("Type") == "Variable"}
     assert env == {"CAMERA_URL", "MQTT_USERNAME", "MQTT_PASSWORD"}

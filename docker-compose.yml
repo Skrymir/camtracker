@@ -5,6 +5,8 @@ services:
     image: ghcr.io/skrymir/camtracker
     container_name: camtracker
     restart: unless-stopped
+    ports:
+      - "8080:8080"                  # the live view ([web] port)
     # The Coral changes its USB ID (and device node) on its first use after
     # power-up, so a --device list made at start goes stale. Instead: the live
     # /dev/bus/usb, and permission for any USB device (char major 189).

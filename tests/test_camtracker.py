@@ -1,11 +1,16 @@
 """camtracker.py: frame position -> gaze, who to follow, and the target /
 clear messages it sends. Pure logic: no OpenCV, Coral or broker needed."""
 import math
+import threading
+import time
+import urllib.error
+import urllib.request
 
 import pytest
 
 import camtracker as CT
 import status
+import web
 
 
 class Clock:
@@ -32,7 +37,8 @@ def test_template_loads_and_matches_defaults():
     c = CT.Config("camtracker.ini")
     d = CT.Config(None)
     for k in ("roi", "tiles", "hfov", "gaze_max", "points", "smooth", "hold", "topic",
-              "command_topic", "status_base", "status_node", "min_score", "model"):
+              "command_topic", "status_base", "status_node", "min_score", "model",
+              "web_port", "web_fps", "web_width"):
         assert getattr(c, k) == getattr(d, k), k
     assert c.status_node == "camera"
 
@@ -355,6 +361,37 @@ def test_decoration_in_mask_dropped_person_walking_past_kept():
         passer_by, elsewhere]
 
 
+def test_split_detections_people_same_as_tracking_with_near_misses_beside():
+    c = cfg(min_score=0.5, ignore=[(0.78, 0.13, 0.83, 0.29)],
+            ignore_masks=[[(0.6, 0.1), (0.7, 0.1), (0.7, 0.35), (0.6, 0.35)]])
+    person = (0.9, 0.40, 0.10, 0.45, 0.60)
+    same_by_next_tile = (0.7, 0.401, 0.10, 0.451, 0.60)
+    near = (0.4, 0.10, 0.20, 0.14, 0.50)
+    ghost = (0.8, 0.785, 0.135, 0.828, 0.288)
+    faint_ghost = (0.35, 0.62, 0.12, 0.66, 0.30)          # a near miss, in a mask
+    people, nears, ignored = CT.split_detections(
+        [person, same_by_next_tile, near, ghost, faint_ghost], c)
+    assert people == [person] and nears == [near]
+    assert set(ignored) == {ghost, faint_ghost}
+    # without the low look (nobody on the live view) tracking sees the same
+    raw = [person, same_by_next_tile, ghost]
+    assert CT.split_detections(raw, c)[0] == CT.drop_ignored(CT.merge(raw), c.ignore) == [person]
+
+
+def test_followed_is_the_box_nearest_the_tracked_u():
+    a, b = box(0.3), box(0.7)
+    assert CT.followed([a, b], 0.65) == b
+    assert CT.followed([a, b], None) is None
+    assert CT.followed([], 0.5) is None
+
+
+def test_view_status_line():
+    assert CT.view_status(True, True, 0.123, -0.3, 14.6) == \
+        "show on | following x=+0.12 y=-0.30 | 15 det/s"
+    assert CT.view_status(True, False, 0, 0, 15) == "show on | nobody followed | 15 det/s"
+    assert CT.view_status(False, False, 0, 0, 5) == "show off (not following) | 5 det/s"
+
+
 def test_ssd_people_min_score_override():
     c = cfg(person_id=0, min_score=0.5, min_height=0.0)
     args = ([(0.1, 0.1, 0.9, 0.2)], [0], [0.35], 1, (0, 0, 100, 100), 100, 100, c)
@@ -389,3 +426,144 @@ def test_top_of_a_near_person_merged_into_them():
     assert CT.drop_contained([top, near, far]) == [near, far]
     side_by_side = (0.8, 0.52, 0.30, 0.62, 0.95)
     assert len(CT.drop_contained([near, side_by_side])) == 2
+
+
+# -- live view -------------------------------------------------------------------
+class FakeFrame:
+    shape = (720, 1280, 3)
+
+
+class LoopGrabber:
+    """Hands out a new frame on every call, like a live stream."""
+    ok = True
+
+    def __init__(self):
+        self.seq, self.running = 0, False
+
+    def start(self):
+        self.running = True
+
+    def stop(self):
+        self.running = False
+
+    def latest(self, after_seq, timeout=1.0):
+        time.sleep(0.005)
+        self.seq += 1
+        return self.seq, FakeFrame()
+
+
+class FakeDetector:
+    device = "fake"
+
+    def __init__(self, raw):
+        self.raw, self.asked = raw, []
+
+    def detect_raw(self, frame, tiles, min_score=None):
+        self.asked.append(min_score)
+        return [d for d in self.raw if d[0] >= (min_score or 0.5)]
+
+
+def test_live_view_wanted_lingers_after_the_last_viewer():
+    clock = Clock()
+    v = web.LiveView(lambda s, w: b"", linger_s=10, clock=clock)
+    assert not v.wanted
+    with v.viewer():
+        assert v.wanted
+    clock.t += 9
+    assert v.wanted                                  # a page reload keeps the camera on
+    clock.t += 2
+    assert not v.wanted
+
+
+def test_live_view_renders_each_frame_once_for_every_viewer():
+    renders = []
+    v = web.LiveView(lambda s, w: renders.append((s, w)) or f"jpg{s}".encode(), width=640)
+    assert v.frame_jpeg(0, timeout=0.01) == (0, None)
+    v.offer(1)
+    assert v.frame_jpeg(0) == (1, b"jpg1") == v.frame_jpeg(0)
+    assert renders == [(1, 640)]
+    v.offer(2)
+    assert v.frame_jpeg(1) == (2, b"jpg2")
+
+
+def test_live_view_full_frame_waits_for_a_fresh_one():
+    v = web.LiveView(lambda s, w: f"{s}@{w}".encode())
+    v.offer("old")
+    threading.Timer(0.05, v.offer, ["new"]).start()
+    assert v.full_jpeg(timeout=2) == b"new@None"
+    assert v.full_jpeg(timeout=0.01) is None
+
+
+def test_web_server_page_stream_and_snapshot():
+    v = web.LiveView(lambda s, w: b"JPEG" + str(s).encode(), fps=50)
+    srv = web.serve(v, 0, host="127.0.0.1")
+    base = f"http://127.0.0.1:{srv.server_address[1]}"
+    stop = threading.Event()
+
+    def feed():                                      # the detection loop, while wanted
+        n = 0
+        while not stop.is_set():
+            if v.wanted:
+                n += 1
+                v.offer(n)
+            time.sleep(0.01)
+    threading.Thread(target=feed, daemon=True).start()
+    try:
+        page = urllib.request.urlopen(base + "/").read().decode()
+        assert 'src="stream.mjpg"' in page
+        with urllib.request.urlopen(base + "/stream.mjpg") as r:
+            assert r.headers["Content-Type"].startswith("multipart/x-mixed-replace")
+            assert r.read(9) == b"--frame\r\n"
+            assert b"Content-Type: image/jpeg" in r.readline()
+            assert v.wanted
+        assert urllib.request.urlopen(base + "/snapshot.jpg").read().startswith(b"JPEG")
+        with pytest.raises(urllib.error.HTTPError):
+            urllib.request.urlopen(base + "/nope")
+    finally:
+        stop.set()
+        srv.shutdown()
+
+
+def test_loop_runs_for_a_viewer_with_the_show_off_without_tracking():
+    person, near = (0.9, 0.40, 0.10, 0.45, 0.60), (0.4, 0.10, 0.20, 0.14, 0.50)
+    det = FakeDetector([person, near])
+    states = []
+    v = web.LiveView(lambda s, w: b"")
+    v.offer = states.append
+    c = cfg(status_enabled=False, detect_fps=100, min_score=0.5)
+    s = CT.CamTracker(c, det, grabber=LoopGrabber(), view=v)
+    s.client = FakeClient()
+    assert not s.enabled
+    run = threading.Thread(target=s.run, daemon=True)
+    with v.viewer():
+        run.start()
+        time.sleep(0.2)
+    s.stop()
+    run.join(2)
+    assert states and states[-1]["people"] == [person] and states[-1]["near"] == [near]
+    assert states[-1]["status"].startswith("show off")
+    assert s.client.sent == [] and not s.tracker.have   # watched, not followed
+    assert set(det.asked) == {CT.near_miss_score(c)}
+
+
+def test_loop_idle_with_the_show_off_and_nobody_looking():
+    det = FakeDetector([])
+    s = CT.CamTracker(cfg(status_enabled=False), det, grabber=LoopGrabber(),
+                      view=web.LiveView(lambda s, w: b""))
+    run = threading.Thread(target=s.run, daemon=True)
+    run.start()
+    time.sleep(0.1)
+    s.stop()
+    run.join(2)
+    assert det.asked == [] and not s.grabber.running
+
+
+def test_render_view_draws_and_encodes():
+    np = pytest.importorskip("numpy")
+    pytest.importorskip("cv2")
+    c = cfg(ignore_masks=[[(0.1, 0.1), (0.2, 0.1), (0.2, 0.2)]])
+    p = (0.9, 0.40, 0.10, 0.45, 0.60)
+    state = {"frame": np.zeros((2160, 3840, 3), np.uint8), "people": [p], "near": [],
+             "ignored": [], "follow": p, "status": "show on"}
+    small, full = CT.render_view(c, state, 1280), CT.render_view(c, state)
+    assert small[:2] == full[:2] == b"\xff\xd8" and len(small) < len(full)

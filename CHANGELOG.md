@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Live view (`[web]`, port 8080): a web page with the camera's picture and
+  the `--snapshot` drawing on it, live, plus the person being followed in
+  green and the show state / x / y along the top. It works with the show off
+  (the camera is read while someone is looking), costs nothing while nobody
+  is, and is the container's WebUI in Unraid. Tracking is unchanged: near
+  misses are found beside it, not instead.
 - `[detector] ignore_masks`: decorations can be drawn as polygons in
   Frigate's mask editor and its coordinates pasted in as they are. A
   detection with `ignore_inside` (default 0.6) of its box inside a mask is

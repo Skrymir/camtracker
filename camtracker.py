@@ -21,12 +21,16 @@ Runs in Docker on a server with a USB Coral (see README.md).
                                              # (for calibration); add
                                              # --no-publish to leave the eyes alone
 
+While running, http://<server>:8080/ is a live view: the camera with the same
+drawing as --snapshot, plus who is being followed ([web] port; 0 = off).
+
 Only the run/IO parts need OpenCV and tflite_runtime; the mapping, tracking
 and detection-parsing logic (Mapper, pick, Tracker, ssd_people) is pure Python
 and unit-tested on its own.
 """
 
 import argparse
+import collections
 import configparser
 import glob
 import json
@@ -40,6 +44,7 @@ import threading
 import time
 
 import status
+import web
 
 DEFAULTS = {
     "camera": {
@@ -103,6 +108,14 @@ DEFAULTS = {
         # a detection further than this (fraction of the frame width) from the
         # tracked person is someone else
         "max_jump": "0.25",
+    },
+    "web": {
+        # the live view (http://<server>:<port>/): the camera with what the
+        # tracker sees drawn on it. 0 = off.
+        "port": "8080",
+        # the stream's frame rate and width (it's scaled down, to save CPU)
+        "fps": "5",
+        "width": "1280",
     },
     "status": dict(status.STATUS_DEFAULTS, node="camera", refresh_s="60",
                    last_seen_every_s="10"),
@@ -234,6 +247,10 @@ class Config:
         self.hold = cp.getfloat("tracking", "hold_s")
         self.lost_after = cp.getfloat("tracking", "lost_after_s")
         self.max_jump = cp.getfloat("tracking", "max_jump")
+
+        self.web_port = cp.getint("web", "port")
+        self.web_fps = cp.getfloat("web", "fps")
+        self.web_width = cp.getint("web", "width")
 
         st = status.load_section(cp, "status")
         self.status_enabled = st["enabled"]
@@ -399,6 +416,33 @@ def drop_ignored(dets, ignore, min_iou=0.5, masks=(), min_inside=0.6):
     return [d for d in dets
             if all(iou(d[1:], b) < min_iou for b in ignore)
             and all(inside_fraction(d[1:], m) < min_inside for m in masks)]
+
+
+def merge(dets):
+    """One box per person from every tile's detections."""
+    return drop_contained(nms(dets))
+
+
+def split_detections(raw, cfg):
+    """All tiles' detections (from detect_raw) -> (people, near, ignored).
+    people are exactly what tracking sees (raw at min_score and up, merged,
+    decorations dropped); near: merged boxes just under min_score, if raw
+    went lower; ignored: either kind matching an ignore box or mask."""
+    def keep(ds):
+        return drop_ignored(ds, cfg.ignore, cfg.ignore_iou, cfg.ignore_masks,
+                            cfg.ignore_inside)
+    found = merge([d for d in raw if d[0] >= cfg.min_score])
+    below = [d for d in merge(raw) if d[0] < cfg.min_score]
+    people, near = keep(found), keep(below)
+    ignored = [d for d in found + below if d not in people and d not in near]
+    return people, near, ignored
+
+
+def followed(people, last_u):
+    """The person being followed: the box whose centre is nearest last_u."""
+    if not people or last_u is None:
+        return None
+    return min(people, key=lambda d: abs((d[1] + d[3]) / 2 - last_u))
 
 
 def tile_boxes(roi, frame_w, frame_h, tiles=0, overlap=0.15):
@@ -624,6 +668,10 @@ class CoralDetector:
     def detect(self, frame, tiles, min_score=None):
         """People in frame (BGR) within the tile rectangles ->
         [(score, x1, y1, x2, y2)] as fractions of the whole frame."""
+        return merge(self.detect_raw(frame, tiles, min_score))
+
+    def detect_raw(self, frame, tiles, min_score=None):
+        """Every tile's people, before duplicates are merged."""
         import cv2
         fh, fw = frame.shape[:2]
         out = []
@@ -636,7 +684,7 @@ class CoralDetector:
             boxes, classes, scores, count = (self.interp.get_tensor(i)[0] for i in self._outputs)
             out += ssd_people(boxes, classes, scores, int(count), tile, fw, fh, self.cfg,
                               min_score)
-        return drop_contained(nms(out))
+        return out
 
 
 # ------------------------------------------------------------------- service
@@ -653,9 +701,10 @@ class CamTracker:
     ON_WORDS = set(status.ON_WORDS)
     OFF_WORDS = set(status.OFF_WORDS)
 
-    def __init__(self, cfg, detector=None, grabber=None, publish=True, watch=False):
+    def __init__(self, cfg, detector=None, grabber=None, publish=True, watch=False, view=None):
         self.cfg = cfg
         self.detector = detector
+        self.view = view
         self.grabber = grabber or FrameGrabber(cfg.url)
         self.tracker = Tracker(cfg)
         self.publish = publish
@@ -753,13 +802,15 @@ class CamTracker:
     # -- main loop --
     def run(self):
         tiles, seq, frames, t_log = None, 0, 0, time.monotonic()
-        last_have = False
+        last_have, recent = False, collections.deque(maxlen=30)    # detection times
         while not self._stop.is_set():
             with self._lock:
                 enabled = self.enabled
-            if not enabled:
+            viewing = self.view is not None and self.view.wanted
+            if not (enabled or viewing):
                 self.grabber.stop()
                 tiles = None
+                recent.clear()
                 self._stop.wait(0.5)
                 continue
             self.grabber.start()
@@ -773,13 +824,22 @@ class CamTracker:
                 h, w = frame.shape[:2]
                 tiles = frame_tiles(self.cfg, w, h)
                 print(f"[cam] frame {w}x{h}, {len(tiles)} tile(s): {tiles}", flush=True)
-            dets = drop_ignored(self.detector.detect(frame, tiles), self.cfg.ignore,
-                                self.cfg.ignore_iou, self.cfg.ignore_masks,
-                                self.cfg.ignore_inside)
+            # someone on the live view: look lower too, so near misses show
+            # (people, what tracking sees, is the same either way)
+            raw = self.detector.detect_raw(frame, tiles,
+                                           near_miss_score(self.cfg) if viewing else None)
+            dets, near, ignored = split_detections(raw, self.cfg)
             with self._lock:
                 if self.enabled:
                     self._send(self.tracker.update(dets))
-                have = self.tracker.have
+                have, sx, sy = self.tracker.have, self.tracker.sx, self.tracker.sy
+                last_u = self.tracker.last_u if have else None
+            recent.append(time.monotonic())
+            if viewing:
+                rate = (len(recent) - 1) / max(1e-3, recent[-1] - recent[0])
+                self.view.offer({"frame": frame, "people": dets, "near": near,
+                                 "ignored": ignored, "follow": followed(dets, last_u),
+                                 "status": view_status(enabled, have, sx, sy, rate)})
             if have != last_have:
                 print(f"[tgt] {'acquired' if have else 'cleared'}"
                       + (f"  x={self.tracker.sx:+.2f} y={self.tracker.sy:+.2f}" if have else ""),
@@ -824,10 +884,91 @@ def frame_detail(frame):
     return float(frame[::8, ::8].std())
 
 
+# colours (BGR)
+ROI_C, TILE_C, FAR_TILE_C = (0, 200, 255), (255, 160, 0), (255, 255, 0)
+PERSON_C, FOLLOW_C, NEAR_C, IGNORED_C = (0, 0, 255), (0, 220, 0), (0, 140, 255), (255, 0, 255)
+
+
+def draw_overlay(img, cfg, frame_w, frame_h, people=(), near=(), ignored=(), follow=None,
+                 status_line=None):
+    """Draw the ROI, tiles, ignore boxes/masks, detections and the u ruler on
+    img (the frame, or a smaller copy of it), in place. Returns
+    [(what, det)] for each detection drawn."""
+    import cv2
+    import numpy as np
+    h, w = img.shape[:2]
+    k = w / 640                                     # drawing scale: readable at 4K too
+    thin, thick = max(1, round(k)), max(2, round(2 * k))
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    sx, sy = w / frame_w, h / frame_h
+    n_main = len(tile_boxes(cfg.roi, frame_w, frame_h, cfg.tiles))
+    for i, (x1, y1, x2, y2) in enumerate(frame_tiles(cfg, frame_w, frame_h)):
+        cv2.rectangle(img, (int(x1 * sx), int(y1 * sy)), (int(x2 * sx), int(y2 * sy)),
+                      TILE_C if i < n_main else FAR_TILE_C, thin)
+
+    def px(x, y):
+        return int(x * w), int(y * h)
+
+    r = cfg.roi
+    cv2.rectangle(img, px(r[0], r[1]), px(r[2], r[3]), ROI_C, thick)
+    for b in cfg.ignore:
+        cv2.rectangle(img, px(b[0], b[1]), px(b[2], b[3]), IGNORED_C, thin)
+    for poly in cfg.ignore_masks:
+        cv2.polylines(img, [np.array([px(x, y) for x, y in poly], np.int32)], True,
+                      IGNORED_C, thin)
+    drawn = ([("ignored", d) for d in ignored] + [("near miss", d) for d in near]
+             + [("following" if d == follow else "person", d) for d in people])
+    colours = {"ignored": IGNORED_C, "near miss": NEAR_C, "person": PERSON_C,
+               "following": FOLLOW_C}
+    for what, d in drawn:
+        p1, p2 = px(d[1], d[2]), px(d[3], d[4])
+        cv2.rectangle(img, p1, p2, colours[what], thick)
+        label = f"{d[0]:.2f} u={(d[1] + d[3]) / 2:.2f}"
+        (tw, th), _ = cv2.getTextSize(label, font, 0.45 * k, thin)
+        cv2.putText(img, label, (min(p1[0], w - tw), max(th + thin, p1[1] - int(4 * k))),
+                    font, 0.45 * k, colours[what], thin)
+    for i in range(1, 10):                          # u ruler along the bottom
+        x = int(i / 10 * w)
+        cv2.line(img, (x, h - int(14 * k)), (x, h), (255, 255, 255), thin)
+        cv2.putText(img, f"{i / 10:.1f}", (x + int(3 * k), h - int(3 * k)),
+                    font, 0.4 * k, (255, 255, 255), thin)
+    if status_line:                                 # top left, on a dark band
+        (tw, th), base = cv2.getTextSize(status_line, font, 0.5 * k, thin)
+        cv2.rectangle(img, (0, 0), (tw + int(12 * k), th + base + int(10 * k)), (0, 0, 0), -1)
+        cv2.putText(img, status_line, (int(6 * k), th + int(5 * k)), font, 0.5 * k,
+                    (255, 255, 255), thin)
+    return drawn
+
+
+def view_status(enabled, have, sx, sy, rate):
+    """The live view's top line."""
+    show = "show on" if enabled else "show off (not following)"
+    who = f"following x={sx:+.2f} y={sy:+.2f}" if have else "nobody followed"
+    return f"{show} | {who} | {rate:.0f} det/s" if enabled else f"{show} | {rate:.0f} det/s"
+
+
+def render_view(cfg, state, width=None):
+    """A live view frame (state from the loop) as JPEG, scaled to width."""
+    import cv2
+    frame = state["frame"]
+    fh, fw = frame.shape[:2]
+    if width and fw > width:
+        img = cv2.resize(frame, (width, round(fh * width / fw)), interpolation=cv2.INTER_AREA)
+    else:
+        img = frame.copy()
+    draw_overlay(img, cfg, fw, fh, state["people"], state["near"], state["ignored"],
+                 state["follow"], state["status"])
+    return cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 80])[1].tobytes()
+
+
+def near_miss_score(cfg):
+    """How low the snapshot and live view look, so near misses show."""
+    return max(0.2, cfg.min_score - 0.2)
+
+
 def snapshot(cfg, detector, path):
     """One frame with the ROI, tiles and detections drawn (for setting up)."""
     import cv2
-    import numpy as np
     g = FrameGrabber(cfg.url)
     g.start()
     # longer than ffmpeg's ~30 s open timeout, so its error is printed first
@@ -851,54 +992,18 @@ def snapshot(cfg, detector, path):
               "(try the camera's H.264 or a lower-resolution stream)", flush=True)
     h, w = frame.shape[:2]
     tiles = frame_tiles(cfg, w, h)
-    n_main = len(tile_boxes(cfg.roi, w, h, cfg.tiles))
+    raw = detector.detect_raw(frame, tiles, near_miss_score(cfg)) if detector else []
+    people, near, ignored = split_detections(raw, cfg)
     img = frame.copy()
-    k = w / 640                                     # drawing scale: readable at 4K too
-    thin, thick = max(1, round(k)), max(2, round(2 * k))
-    for i, (x1, y1, x2, y2) in enumerate(tiles):    # roi tiles blue, far_roi tiles cyan
-        cv2.rectangle(img, (x1, y1), (x2, y2), (255, 160, 0) if i < n_main else (255, 255, 0),
-                      thin)
-    r = cfg.roi
-    cv2.rectangle(img, (int(r[0] * w), int(r[1] * h)), (int(r[2] * w), int(r[3] * h)),
-                  (0, 200, 255), thick)
-    for b in cfg.ignore:                            # ignore boxes: magenta
-        cv2.rectangle(img, (int(b[0] * w), int(b[1] * h)), (int(b[2] * w), int(b[3] * h)),
-                      (255, 0, 255), thin)
-    for poly in cfg.ignore_masks:                   # ignore masks: magenta too
-        pts = np.array([(int(x * w), int(y * h)) for x, y in poly], np.int32)
-        cv2.polylines(img, [pts], True, (255, 0, 255), thin)
     m = Mapper(cfg)
-    # look a bit below min_score too, so near misses show (orange)
-    low = max(0.2, cfg.min_score - 0.2)
-    dets = detector.detect(frame, tiles, min_score=low) if detector else []
-    kept = drop_ignored(dets, cfg.ignore, cfg.ignore_iou, cfg.ignore_masks, cfg.ignore_inside)
-    n_people = 0
-    for d in dets:
+    for what, d in draw_overlay(img, cfg, w, h, people, near, ignored):
         u = (d[1] + d[3]) / 2
-        if d not in kept:
-            what, colour = "ignored", (255, 0, 255)
-        elif d[0] < cfg.min_score:
-            what, colour = "near miss", (0, 140, 255)
-        else:
-            what, colour = "person", (0, 0, 255)
-            n_people += 1
-        p1, p2 = (int(d[1] * w), int(d[2] * h)), (int(d[3] * w), int(d[4] * h))
-        cv2.rectangle(img, p1, p2, colour, thick)
-        label = f"{d[0]:.2f} u={u:.2f}"
-        (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.45 * k, thin)
-        cv2.putText(img, label, (min(p1[0], w - tw), max(th + thin, p1[1] - int(4 * k))),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.45 * k, colour, thin)
         box = ", ".join(f"{v:.2f}" for v in d[1:])
         print(f"[snap] {what:9} score {d[0]:.2f}  u={u:.2f} x={m.gaze_x(u):+.2f}  "
               f"box {box}", flush=True)
-    for i in range(1, 10):                          # u ruler along the bottom
-        x = int(i / 10 * w)
-        cv2.line(img, (x, h - int(14 * k)), (x, h), (255, 255, 255), thin)
-        cv2.putText(img, f"{i / 10:.1f}", (x + int(3 * k), h - int(3 * k)),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.4 * k, (255, 255, 255), thin)
     cv2.imwrite(path, img)
     print(f"[snap] {w}x{h}, detail {frame_detail(frame):.0f}, {len(tiles)} tile(s), "
-          f"{n_people} person(s) -> {path}", flush=True)
+          f"{len(people)} person(s) -> {path}", flush=True)
 
 
 def main(argv=None):
@@ -921,7 +1026,19 @@ def main(argv=None):
         snapshot(cfg, detector, args.snapshot)
         return
 
-    t = CamTracker(cfg, detector, publish=not args.no_publish, watch=args.watch)
+    view = None
+    if cfg.web_port:
+        view = web.LiveView(lambda state, width: render_view(cfg, state, width),
+                            fps=cfg.web_fps, width=cfg.web_width)
+        try:
+            web.serve(view, cfg.web_port)
+            print(f"[web] live view on port {cfg.web_port}: "
+                  f"http://<this server>:{cfg.web_port}/", flush=True)
+        except OSError as e:                        # port taken: track anyway
+            print(f"[web] !! can't serve the live view on port {cfg.web_port}: {e}",
+                  flush=True)
+            view = None
+    t = CamTracker(cfg, detector, publish=not args.no_publish, watch=args.watch, view=view)
 
     def _sigterm(*_):
         t.stop()

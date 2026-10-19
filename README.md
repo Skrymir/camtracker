@@ -116,6 +116,14 @@ If people far away are missed while `roi` is tall, add `far_roi` over the far
 strip: it is searched again with smaller tiles, so distant people look bigger
 to the model.
 
+Or use the **live view** (once it's running, step 6):
+`http://<server>:8080/`, or *WebUI* on the container in Unraid's Docker
+tab. It's the same drawing on the live picture, with the person being
+followed in green and the show state and x/y along the top, and it works with
+the show off. Edit `camtracker.ini`, restart the container, and look again;
+*Full-resolution frame* on the page gives one 4K frame. Nothing is drawn
+while nobody is looking. `[web] port = 0` turns it off.
+
 ### 5. Calibrate (watch)
 
 Same command with `--watch --no-publish` instead of `--snapshot ...`. Have
@@ -134,7 +142,8 @@ points = 0.12:0.9, 0.5:0, 0.88:-0.9
 
 **From the Unraid Docker tab** (updates with *Check for Updates*): add the
 template, then *Docker → Add Container → Template: camtracker*. Fill in Camera
-URL and the MQTT login (the values in `camtracker.env`) and apply.
+URL and the MQTT login (the values in `camtracker.env`) and apply. The Live
+view port (8080) is the container's *WebUI*.
 
 ```bash
 curl -fsSL -o /boot/config/plugins/dockerMan/templates-user/my-camtracker.xml \
@@ -149,7 +158,7 @@ settings. A change to `camtracker.ini` alone needs only a restart.
 Or `docker compose up -d` in the repo (Compose Manager plugin), or:
 
 ```bash
-docker run -d --name camtracker --restart unless-stopped \
+docker run -d --name camtracker --restart unless-stopped -p 8080:8080 \
   --device-cgroup-rule='c 189:* rmw' -v /dev/bus/usb:/dev/bus/usb \
   -v /mnt/user/appdata/camtracker:/config \
   --env-file /mnt/user/appdata/camtracker/camtracker.env \
