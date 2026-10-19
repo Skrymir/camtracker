@@ -60,16 +60,22 @@ device node, which is why the container gets the live `/dev/bus/usb` and
 permission for any USB device (`--device-cgroup-rule='c 189:* rmw'`) rather
 than a fixed device list: otherwise the first start after a reboot fails.
 
-### 2. Build the image
+### 2. Get the image
 
-Clone this repo onto the server (any share), then in the Unraid terminal:
+GitHub builds it on every push to master (once the tests pass) and publishes
+it as `ghcr.io/skrymir/camtracker` (`:latest`, plus `:0.2.1` etc. for version
+tags). In the Unraid terminal:
+
+```bash
+docker pull ghcr.io/skrymir/camtracker
+```
+
+Or build it yourself from a clone of this repo, under the same name:
 
 ```bash
 cd /mnt/user/appdata/camtracker-src     # wherever you cloned the repo
-docker build -t camtracker .
+docker build -t ghcr.io/skrymir/camtracker .
 ```
-
-Rebuild after pulling new code; the image holds camtracker.py.
 
 ### 3. Config and secrets
 
@@ -94,7 +100,7 @@ it if the camera is already in Frigate (or use Frigate's restream,
 docker run --rm --device-cgroup-rule='c 189:* rmw' -v /dev/bus/usb:/dev/bus/usb \
   -v /mnt/user/appdata/camtracker:/config \
   --env-file /mnt/user/appdata/camtracker/camtracker.env \
-  camtracker --snapshot /config/snap.jpg
+  ghcr.io/skrymir/camtracker --snapshot /config/snap.jpg
 ```
 
 Open `snap.jpg` (it's in the appdata share). Yellow = the ROI, blue = the
@@ -126,14 +132,28 @@ points = 0.12:0.9, 0.5:0, 0.88:-0.9
 
 ### 6. Run it for good
 
-`docker compose up -d` in the repo (Compose Manager plugin), or:
+**From the Unraid Docker tab** (updates with *Check for Updates*): add the
+template, then *Docker → Add Container → Template: camtracker*. Fill in Camera
+URL and the MQTT login (the values in `camtracker.env`) and apply.
+
+```bash
+curl -fsSL -o /boot/config/plugins/dockerMan/templates-user/my-camtracker.xml \
+  https://raw.githubusercontent.com/Skrymir/camtracker/master/unraid/camtracker.xml
+```
+
+Replacing a container started by hand? `docker rm -f camtracker` first, so
+the name is free. After that, a new build shows as *update ready* in the
+Docker tab; *apply update* pulls it and restarts the container with the same
+settings. A change to `camtracker.ini` alone needs only a restart.
+
+Or `docker compose up -d` in the repo (Compose Manager plugin), or:
 
 ```bash
 docker run -d --name camtracker --restart unless-stopped \
   --device-cgroup-rule='c 189:* rmw' -v /dev/bus/usb:/dev/bus/usb \
   -v /mnt/user/appdata/camtracker:/config \
   --env-file /mnt/user/appdata/camtracker/camtracker.env \
-  camtracker
+  ghcr.io/skrymir/camtracker
 ```
 
 It's idle until the show turns on (`house/show/command`).

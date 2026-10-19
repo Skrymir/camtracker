@@ -1,6 +1,6 @@
 # camtracker: camera person tracker for an x86-64 server with a USB Coral.
-# Build:
-#   docker build -t camtracker .
+# Build (CI publishes the same as ghcr.io/skrymir/camtracker):
+#   docker build -t ghcr.io/skrymir/camtracker .
 #
 # Google's Coral apt repo is gone (the project was deleted), so this follows
 # Frigate: Debian 12 (bookworm), libedgetpu from feranick's maintained builds,

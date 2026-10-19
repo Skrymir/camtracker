@@ -6,6 +6,9 @@
   Frigate's mask editor and its coordinates pasted in as they are. A
   detection with `ignore_inside` (default 0.6) of its box inside a mask is
   dropped. `--snapshot` draws the masks in magenta. `ignore` boxes still work.
+- The image is published as `ghcr.io/skrymir/camtracker` by CI (after the
+  tests, on every push to master and version tag), and `unraid/camtracker.xml`
+  is an Unraid template for it, so updates come from the Docker tab.
 
 ## 0.2.1 — 2026-10-12
 

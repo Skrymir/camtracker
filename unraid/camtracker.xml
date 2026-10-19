@@ -1,0 +1,22 @@
+<?xml version="1.0"?>
+<!-- Unraid Docker template. Copy to /boot/config/plugins/dockerMan/templates-user/my-camtracker.xml
+     then Docker > Add Container > Template: camtracker. Updates: Docker > Check for Updates. -->
+<Container version="2">
+  <Name>camtracker</Name>
+  <Repository>ghcr.io/skrymir/camtracker:latest</Repository>
+  <Registry>https://github.com/Skrymir/camtracker/pkgs/container/camtracker</Registry>
+  <Network>bridge</Network>
+  <Privileged>false</Privileged>
+  <Support>https://github.com/Skrymir/camtracker</Support>
+  <Project>https://github.com/Skrymir/camtracker</Project>
+  <Overview>Follows people in a camera's view with a USB Coral and publishes where to look over MQTT. Config: camtracker.ini in the config folder.</Overview>
+  <Category>HomeAutomation:</Category>
+  <!-- The Coral changes its USB ID on first use after power-up, so: the live
+       /dev/bus/usb and permission for any USB device (char major 189). -->
+  <ExtraParams>--device-cgroup-rule='c 189:* rmw' --restart unless-stopped</ExtraParams>
+  <Config Name="Config" Target="/config" Default="/mnt/user/appdata/camtracker" Mode="rw" Description="Holds camtracker.ini (and snapshots)." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/camtracker</Config>
+  <Config Name="USB bus" Target="/dev/bus/usb" Default="/dev/bus/usb" Mode="rw" Description="The live USB bus, for the Coral." Type="Path" Display="advanced" Required="true" Mask="false">/dev/bus/usb</Config>
+  <Config Name="Camera URL" Target="CAMERA_URL" Default="" Mode="" Description="rtsp://user:password@camera-ip:554/stream-path (overrides [camera] url)." Type="Variable" Display="always" Required="false" Mask="true"></Config>
+  <Config Name="MQTT username" Target="MQTT_USERNAME" Default="" Mode="" Description="Overrides [mqtt] username." Type="Variable" Display="always" Required="false" Mask="false"></Config>
+  <Config Name="MQTT password" Target="MQTT_PASSWORD" Default="" Mode="" Description="Overrides [mqtt] password." Type="Variable" Display="always" Required="false" Mask="true"></Config>
+</Container>

@@ -2,7 +2,7 @@
 services:
   camtracker:
     build: .
-    image: camtracker
+    image: ghcr.io/skrymir/camtracker
     container_name: camtracker
     restart: unless-stopped
     # The Coral changes its USB ID (and device node) on its first use after
